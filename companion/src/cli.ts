@@ -16,6 +16,8 @@ import { buildTools } from "./tools/adapter.js";
 import type { PingResult, SpawnResult } from "./types.js";
 import { assertProtocolCompatibility } from "./protocol/contract.js";
 import { AutonomousSupervisor } from "./autonomous/supervisor.js";
+import { MemoryStore } from "./autonomous/memory.js";
+import { CoordinationBroker } from "./coordination/broker.js";
 
 const HELP = `agentic-factorio — an AI companion for your Factorio world
 
@@ -24,6 +26,8 @@ Usage:
   agentic-factorio play [options]     connect to your hosted game and start the companion
   agentic-factorio mcp [options]      run as an MCP server (for Claude Code / Codex subscriptions)
   agentic-factorio doctor [options]   check every link in the chain and say what to fix
+  agentic-factorio autonomous-status show persisted campaign state without invoking an LLM
+  agentic-factorio autonomous-reset --confirm  permanently clear persisted campaign state
 
 Options:
   --rcon-host <host>       RCON host (default 127.0.0.1, env AGENTIC_RCON_HOST)
@@ -39,6 +43,7 @@ Options:
   --fresh                  start with a blank memory (ignore the saved session)
   --workers <count>        autonomous worker contexts (default 3, range 1-4)
   --json                   doctor: emit a redacted machine-readable report
+  --confirm                required by autonomous-reset
 
 Provider keys: OPENROUTER_API_KEY (recommended), ANTHROPIC_API_KEY or OPENAI_API_KEY.
 No key? Use your Claude Code / Codex subscription: run \`agentic-factorio setup\` and
@@ -128,11 +133,11 @@ async function play(settings: Settings, fresh: boolean, brainKind: string, worke
     });
   } else if (brainKind === "autonomous") {
     const key = sessionKey(settings.rcon.host, settings.rcon.port);
-    const tools = buildTools(bridge, { onTool: (name, detail) => log.tool(name, detail) });
-    const supervisor = new AutonomousSupervisor(bridge, apiModel!.model as never, tools, {
-      key: fresh ? `${key}-fresh-${Date.now()}` : key,
-      workers,
-    });
+    if (fresh) {
+      new MemoryStore(key).reset();
+      await new CoordinationBroker(key).reset();
+    }
+    const supervisor = new AutonomousSupervisor(bridge, apiModel!.model as never, { key, workers });
     await supervisor.start();
     loop = supervisor;
   } else {
@@ -195,6 +200,7 @@ async function main(): Promise<void> {
       help: { type: "boolean", short: "h" },
       json: { type: "boolean" },
       workers: { type: "string" },
+      confirm: { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -249,6 +255,28 @@ async function main(): Promise<void> {
     case "doctor":
       await runDoctor(resolveSettings(flags), { json: values.json ?? false });
       return;
+    case "autonomous-status": {
+      const settings = resolveSettings(flags);
+      const key = sessionKey(settings.rcon.host, settings.rcon.port);
+      const memory = new MemoryStore(key).load();
+      const broker = await new CoordinationBroker(key).snapshot();
+      console.log(JSON.stringify({
+        objective: memory.objective, status: memory.campaignStatus, paused: memory.paused,
+        goals: Object.fromEntries(["pending", "ready", "active", "verifying", "blocked", "done", "failed", "cancelled"].map((status) => [status, memory.goals.filter((goal) => goal.status === status).length])),
+        blockers: memory.blockers, activeJobs: memory.activeJobs, agents: broker.agents,
+        leases: broker.leases, reservations: broker.reservations, lastCheckpoint: memory.timestamps.lastCheckpointAt,
+      }, null, 2));
+      return;
+    }
+    case "autonomous-reset": {
+      if (!values.confirm) throw new Error("autonomous-reset is destructive; repeat with --confirm");
+      const settings = resolveSettings(flags);
+      const key = sessionKey(settings.rcon.host, settings.rcon.port);
+      new MemoryStore(key).reset();
+      await new CoordinationBroker(key).reset();
+      console.log(`Reset autonomous state for ${key}.`);
+      return;
+    }
     default:
       console.log(HELP);
       process.exit(1);

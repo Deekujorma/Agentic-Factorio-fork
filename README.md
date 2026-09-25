@@ -22,23 +22,39 @@ server for Claude Code / Codex.
 
 ### Autonomous Ollama campaigns
 
-Run a persistent coordinator and up to three tactical worker model contexts against the
-same already-running Ollama endpoint (no extra server processes or global Ollama changes):
+Run one persistent strategic coordinator and bounded tactical worker contexts
+against the same already-running Ollama endpoint:
 
 ```sh
 npx agentic-factorio play --brain autonomous --provider ollama --model qwen3 --workers 3
 ```
 
-The default is three workers (configurable from 1–4). LLM workers are short-lived model
-conversations; Factorio companions are the separately leased physical bodies they control.
-Campaign memory, the goal graph, broker checkpoints, and a compact JSONL trajectory are
-stored under `~/.config/agentic-factorio/autonomous/` and
-`~/.config/agentic-factorio/coordination/`, keyed by RCON host and port. Restarting the
-same command resumes that state; `--fresh` starts a separate campaign. `!stop` aborts
-generation and game tasks, persists a paused checkpoint, and never resumes until a new
-player instruction arrives. Current limitations: deterministic production planning uses
-recipe data supplied by the running game, and goals needing unavailable observations stay
-blocked for refresh rather than being accepted on the model's word.
+The application creates no Ollama process and changes no Ollama service or
+global setting. The coordinator and workers reuse the same provider/model
+handle, but every worker invocation is an independent short tactical context.
+The default is **3 workers**, configurable from 1–4. LLM workers are model
+contexts; Factorio companions are distinct physical bodies protected by broker
+leases and spatial reservations.
+
+Campaign memory, the versioned goal graph, checkpoints, and the concise JSONL
+trajectory are stored under `~/.config/agentic-factorio/autonomous/`. Broker
+jobs, leases, and reservations are under
+`~/.config/agentic-factorio/coordination/`. Both are keyed by RCON host and
+port. Restart the same command to resume. Use `--fresh` to atomically start that
+host/port campaign over, or inspect/reset it without an LLM:
+
+```sh
+npx agentic-factorio autonomous-status
+npx agentic-factorio autonomous-reset --confirm
+```
+
+`!stop` aborts active model requests, cancels Factorio tasks, recovers leases,
+persists a stopped checkpoint, and will not resume until a new player
+instruction arrives. Worker output is only evidence: typed read-only game
+checks decide whether strategic goals complete. The deterministic
+`plan_production` tool reads actual recipes from the running force and handles
+recursive intermediates, fluids, alternate/locked recipes, and cycles; it does
+not design belt topology or optimize layouts.
 
 ## Quickstart
 

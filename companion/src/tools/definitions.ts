@@ -21,6 +21,7 @@ import {
 import { captureView } from "../vision.js";
 import type { ToolSpec } from "./adapter.js";
 import { defineTool as spec, directionField, itemsField } from "./core.js";
+import { planProduction, recipeSchema } from "../autonomous/productionPlanner.js";
 
 const num = (n: number): string => n.toLocaleString("en-US");
 
@@ -357,6 +358,20 @@ export function toolSpecs(): ToolSpec[] {
       }),
       async (bridge, { radius }) =>
         formatState(await bridge.call<GetStateResult>("get_state", { radius })),
+    ),
+
+    spec(
+      "plan_production",
+      "Read the running force's actual recipes and deterministically calculate the recursive machines-at-speed-one, intermediate rates, fluids, alternatives and raw demand for a target rate. This is read-only; use it instead of estimating ratios from memory.",
+      z.object({
+        item: z.string().min(1).describe('target item, e.g. "automation-science-pack"'),
+        rate_per_minute: z.number().positive().max(1_000_000),
+      }),
+      async (bridge, { item, rate_per_minute }) => {
+        const response = await bridge.call<{ recipes: unknown[] }>("get_recipe_graph", { item, include_all: true });
+        const recipes = z.array(recipeSchema).parse(response.recipes);
+        return JSON.stringify(planProduction(recipes, item, rate_per_minute));
+      },
     ),
 
     spec(

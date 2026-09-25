@@ -1,4 +1,4 @@
-// TypeScript mirror of docs/PROTOCOL.md (through v4). Keep in sync with the mod.
+// TypeScript mirror of docs/PROTOCOL.md (through v5). Keep in sync with the mod.
 
 export interface Position {
   x: number;

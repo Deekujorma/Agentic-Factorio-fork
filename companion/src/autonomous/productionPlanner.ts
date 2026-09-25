@@ -1,3 +1,43 @@
-export interface Recipe { name:string; category:string; energy:number; enabled:boolean; ingredients:Array<{item:string;amount:number;type?:"item"|"fluid"}>; products:Array<{item:string;amount:number;type?:"item"|"fluid"}> }
-export interface ProductionNode { item:string; ratePerMinute:number; recipe?:string; machines:number; category?:string; ingredients:ProductionNode[]; raw:boolean }
-export function planProduction(recipes:Recipe[],item:string,ratePerMinute:number):ProductionNode { const byProduct=new Map<string,Recipe[]>();for(const r of recipes)for(const p of r.products)(byProduct.get(p.item)??(byProduct.set(p.item,[]),byProduct.get(p.item)!)).push(r); const visit=(name:string,rate:number,stack:string[]):ProductionNode=>{if(stack.includes(name))throw new Error(`recipe cycle: ${[...stack,name].join(" -> ")}`);const recipe=byProduct.get(name)?.find(r=>r.enabled);if(!recipe)return{item:name,ratePerMinute:rate,machines:0,ingredients:[],raw:true};const output=recipe.products.find(p=>p.item===name)!.amount;const crafts=rate/output;return{item:name,ratePerMinute:rate,recipe:recipe.name,category:recipe.category,machines:Math.ceil(crafts*recipe.energy/60),raw:false,ingredients:recipe.ingredients.map(i=>visit(i.item,crafts*i.amount,[...stack,name]))};};if(!(ratePerMinute>0))throw new Error("ratePerMinute must be positive");return visit(item,ratePerMinute,[]); }
+import { z } from "zod";
+
+export const recipeComponentSchema = z.object({ item: z.string(), amount: z.number().positive(), type: z.enum(["item", "fluid"]).default("item") });
+export const recipeSchema = z.object({
+  name: z.string(), category: z.string(), energy: z.number().positive(), enabled: z.boolean(),
+  ingredients: z.array(recipeComponentSchema), products: z.array(recipeComponentSchema).min(1),
+});
+export type Recipe = z.infer<typeof recipeSchema>;
+export interface ProductionNode {
+  item: string; type: "item" | "fluid"; ratePerMinute: number; recipe?: string; craftingTime?: number;
+  category?: string; machinesAtSpeedOne: number; ingredients: ProductionNode[]; raw: boolean; alternatives?: string[];
+}
+export interface ProductionPlan { target: string; ratePerMinute: number; root: ProductionNode; rawDemandPerMinute: Record<string, number>; warnings: string[] }
+
+export function planProduction(rawRecipes: Recipe[], item: string, ratePerMinute: number): ProductionPlan {
+  if (!item.trim()) throw new Error("item must not be empty");
+  if (!Number.isFinite(ratePerMinute) || ratePerMinute <= 0) throw new Error("ratePerMinute must be positive");
+  const recipes = z.array(recipeSchema).parse(rawRecipes);
+  const byProduct = new Map<string, Recipe[]>();
+  for (const recipe of recipes) for (const product of recipe.products) {
+    const existing = byProduct.get(product.item) ?? []; existing.push(recipe); byProduct.set(product.item, existing);
+  }
+  const rawDemandPerMinute: Record<string, number> = {}; const warnings: string[] = [];
+  const visit = (name: string, rate: number, stack: string[], type: "item" | "fluid" = "item"): ProductionNode => {
+    if (stack.includes(name)) throw new Error(`recipe cycle: ${[...stack, name].join(" -> ")}`);
+    const alternatives = byProduct.get(name) ?? [];
+    const recipe = alternatives.filter((candidate) => candidate.enabled).sort((a, b) => a.name.localeCompare(b.name))[0];
+    if (!recipe) {
+      rawDemandPerMinute[name] = (rawDemandPerMinute[name] ?? 0) + rate;
+      if (alternatives.length > 0) warnings.push(`${name}: only locked recipes are available`);
+      return { item: name, type, ratePerMinute: rate, machinesAtSpeedOne: 0, ingredients: [], raw: true, alternatives: alternatives.map((value) => value.name) };
+    }
+    const output = recipe.products.find((product) => product.item === name)!;
+    const craftsPerMinute = rate / output.amount;
+    return {
+      item: name, type: output.type, ratePerMinute: rate, recipe: recipe.name, craftingTime: recipe.energy,
+      category: recipe.category, machinesAtSpeedOne: craftsPerMinute * recipe.energy / 60, raw: false,
+      alternatives: alternatives.filter((value) => value.name !== recipe.name).map((value) => value.name),
+      ingredients: recipe.ingredients.map((ingredient) => visit(ingredient.item, craftsPerMinute * ingredient.amount, [...stack, name], ingredient.type)),
+    };
+  };
+  return { target: item, ratePerMinute, root: visit(item, ratePerMinute, []), rawDemandPerMinute, warnings: [...new Set(warnings)] };
+}

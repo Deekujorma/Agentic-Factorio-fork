@@ -1,9 +1,9 @@
-# Mod ↔ Companion protocol (v3 — executable contract)
+# Mod ↔ Companion protocol (v5 — executable contract)
 
 The runtime method manifest and envelope validator live in
 `companion/src/protocol/contract.ts`. A conformance test verifies that every
 method registered by the Lua mod appears in that manifest. `ping` returns
-`protocol_version: 4`; incompatible clients must fail with an actionable error.
+`protocol_version: 5`; incompatible clients must fail with an actionable error.
 
 This file is the **single source of truth** for the JSON contract between the Factorio mod
 (`mod/agentic-companion`) and the companion app (`companion/`). Both sides must conform to it.
@@ -392,3 +392,20 @@ same time.
 - The mod never blocks; long actions are tasks; the companion polls `get_task` (500 ms).
 - The mod only ever mines resources/trees/rocks (enforced by type filter) — player
   structures can be *operated* (insert/extract/rotate/set_recipe) but never destroyed.
+
+## v5 — autonomous read-only observations
+
+### `verify_autonomous`
+
+Input: `{ checks: VerificationCheck[] }` (1–32 checks). Supported checks are
+`entity_count`, `inventory`, `research`, `production`, and `operational`.
+The method performs no mutation and returns
+`{ tick, results: [{ kind, ok, actual, expected }] }`. Areas are bounded to a
+256-tile radius. Inventory targets may use a unit number or map position.
+
+### `get_recipe_graph`
+
+Input: `{ item, include_all? }`. Returns the running force's actual normalized
+recipes (`name`, category, energy, enabled state, typed ingredients and typed
+products). It is read-only. The companion's deterministic `plan_production`
+tool consumes this data; no arbitrary Lua is accepted or evaluated.
