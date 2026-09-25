@@ -36,6 +36,9 @@ function M.init()
   storage.rpc_outbox = storage.rpc_outbox or { next_id = 1, by_id = {} }
   -- push events for the brain (see scripts/events.lua): ring buffer like chat
   storage.events = storage.events or { list = {}, next_id = 1 }
+  storage.autonomous = storage.autonomous or { event_counts = { rocket_launched = 0 } }
+  storage.autonomous.event_counts = storage.autonomous.event_counts or { rocket_launched = 0 }
+  storage.autonomous.event_ticks = storage.autonomous.event_ticks or { rocket_launched = {} }
 end
 
 return M

@@ -321,6 +321,30 @@ export class CoordinationBroker {
     });
   }
 
+  async renewArea(agentId: string, reservationId: string, ttlSeconds = 300): Promise<AreaReservation> {
+    return this.mutate((state) => {
+      this.touchAgent(state, agentId);
+      const reservation = state.reservations[reservationId];
+      if (!reservation || reservation.agentId !== agentId) throw new Error("worker has no matching active area reservation");
+      reservation.expiresAt = Date.now() + ttlSeconds * 1000;
+      return reservation;
+    });
+  }
+
+  async assertWithinReservation(agentId: string, targets: Array<{ x: number; y: number; radius?: number }>): Promise<void> {
+    await this.mutate((state) => {
+      this.touchAgent(state, agentId);
+      const reservations = Object.values(state.reservations).filter((value) => value.agentId === agentId);
+      if (reservations.length === 0) throw new Error("spatial mutation requires an active area reservation");
+      for (const target of targets) {
+        const contained = reservations.some((reservation) =>
+          Math.hypot(target.x - reservation.center.x, target.y - reservation.center.y) + (target.radius ?? 0) <= reservation.radius
+        );
+        if (!contained) throw new Error(`target (${target.x}, ${target.y}) is outside the worker's active reservation`);
+      }
+    });
+  }
+
   async releaseArea(agentId: string, reservationId: string): Promise<void> {
     await this.mutate((state) => {
       const reservation = state.reservations[reservationId];

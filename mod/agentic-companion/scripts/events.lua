@@ -94,4 +94,16 @@ function M.on_research_finished(event)
     queue_len > 0 and "The queue continues." or "The research queue is now EMPTY — consider picking the next technology."))
 end
 
+function M.on_rocket_launched(_event)
+  storage.autonomous = storage.autonomous or { event_counts = {} }
+  local counts = storage.autonomous.event_counts or {}
+  storage.autonomous.event_counts = counts
+  counts.rocket_launched = (counts.rocket_launched or 0) + 1
+  local ticks = storage.autonomous.event_ticks or {}
+  storage.autonomous.event_ticks = ticks
+  ticks.rocket_launched = ticks.rocket_launched or {}
+  ticks.rocket_launched[#ticks.rocket_launched + 1] = game.tick
+  M.push("rocket_launched", "A rocket was launched.")
+end
+
 return M

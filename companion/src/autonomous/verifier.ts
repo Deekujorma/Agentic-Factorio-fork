@@ -20,6 +20,7 @@ function toRpcCheck(value: Verification): RpcCheck | null {
     case "production": return { kind: value.kind, item: value.item, minimum_per_minute: value.minimumPerMinute };
     case "operational": return { kind: value.kind, entity: value.entity, minimum: value.minimum, area: value.area };
     case "no_factory_blocker": return { kind: value.kind, entity: value.entity, area: value.area };
+    case "event_count": return { kind: value.kind, event: value.event, minimum: value.minimum, after_tick: value.afterTick };
   }
 }
 

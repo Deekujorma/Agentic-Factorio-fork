@@ -10,7 +10,7 @@ const ALLOWED: Record<GoalStatus, readonly GoalStatus[]> = {
 export class GoalGraph {
   constructor(private readonly memory: AutonomousMemory) {}
 
-  create(input: { id?: string; parentId?: string; title: string; description?: string; priority?: number; dependencies?: string[]; verification?: Verification[]; maxAttempts?: number; job?: Goal["job"] }): Goal {
+  create(input: { id?: string; parentId?: string; kind?: Goal["kind"]; title: string; description?: string; priority?: number; dependencies?: string[]; verification?: Verification[]; maxAttempts?: number; job?: Goal["job"] }): Goal {
     const id = input.id ?? `goal-${crypto.randomUUID()}`;
     const existing = this.memory.goals.find((goal) => goal.id === id);
     if (existing) return existing;
@@ -18,7 +18,7 @@ export class GoalGraph {
     for (const dependency of input.dependencies ?? []) this.require(dependency);
     const now = new Date().toISOString();
     const goal: Goal = {
-      id, parentId: input.parentId, title: input.title, description: input.description ?? input.title,
+      id, parentId: input.parentId, kind: input.kind ?? "tactical", title: input.title, description: input.description ?? input.title,
       status: "pending", priority: input.priority ?? 0, dependencies: [...new Set(input.dependencies ?? [])],
       createdAt: now, updatedAt: now, attempts: 0, maxAttempts: input.maxAttempts ?? 3,
       blockers: [], verification: input.verification ?? [], evidence: [],
@@ -52,13 +52,13 @@ export class GoalGraph {
     this.refreshReady(); return goal;
   }
 
-  ready(): Goal[] { this.refreshReady(); return this.memory.goals.filter((goal) => goal.status === "ready").sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt)); }
+  ready(): Goal[] { this.refreshReady(); return this.memory.goals.filter((goal) => goal.kind === "tactical" && goal.status === "ready").sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt)); }
   active(): Goal[] { return this.memory.goals.filter((goal) => goal.status === "active" || goal.status === "verifying"); }
   get(id: string): Goal | undefined { return this.memory.goals.find((goal) => goal.id === id); }
 
   refreshReady(): void {
     for (const goal of this.memory.goals) {
-      if (!(["pending", "blocked", "failed"] as GoalStatus[]).includes(goal.status)) continue;
+      if (goal.kind !== "tactical" || !(["pending", "blocked", "failed"] as GoalStatus[]).includes(goal.status)) continue;
       if (goal.status === "failed" && goal.attempts >= goal.maxAttempts) continue;
       const dependenciesDone = goal.dependencies.every((id) => this.get(id)?.status === "done");
       if (dependenciesDone && goal.blockers.length === 0) { goal.status = "ready"; goal.updatedAt = new Date().toISOString(); }
@@ -67,6 +67,24 @@ export class GoalGraph {
 
   cancelOpen(reason: string): void {
     for (const goal of this.memory.goals) if (!["done", "cancelled"].includes(goal.status)) { goal.status = "cancelled"; goal.result = reason; goal.updatedAt = new Date().toISOString(); }
+  }
+
+  recover(id: string, status: Extract<GoalStatus, "ready" | "blocked" | "active">, reason?: string): Goal {
+    const goal = this.require(id); goal.status = status; goal.updatedAt = new Date().toISOString();
+    goal.blockers = status === "blocked" && reason ? [reason] : [];
+    if (reason && !goal.evidence.includes(reason)) goal.evidence.push(reason);
+    return goal;
+  }
+
+  descendants(id: string): Goal[] {
+    const direct = this.memory.goals.filter((goal) => goal.parentId === id);
+    return direct.flatMap((goal) => [goal, ...this.descendants(goal.id)]);
+  }
+
+  cancelSubtree(id: string, reason: string): Goal[] {
+    const goals = [this.require(id), ...this.descendants(id)];
+    for (const goal of goals) if (!["done", "cancelled"].includes(goal.status)) this.transition(goal.id, "cancelled", reason);
+    return goals;
   }
 
   private require(id: string): Goal { const goal = this.get(id); if (!goal) throw new Error(`unknown goal ${id}`); return goal; }

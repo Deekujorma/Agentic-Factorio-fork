@@ -398,9 +398,12 @@ same time.
 ### `verify_autonomous`
 
 Input: `{ checks: VerificationCheck[] }` (1–32 checks). Supported checks are
-`entity_count`, `inventory`, `research`, `production`, and `operational`.
+`entity_count`, `inventory`, `research`, `production`, `operational`, and
+`no_factory_blocker`, and `event_count` (currently `rocket_launched`). The blocker predicate succeeds only when the matching area contains
+zero machines in a known blocked state.
 The method performs no mutation and returns
-`{ tick, results: [{ kind, ok, actual, expected }] }`. Areas are bounded to a
+`{ tick, results: [{ kind, ok, actual, expected }] }`. Event checks can include
+`after_tick` so completion is grounded after the campaign began. Areas are bounded to a
 256-tile radius. Inventory targets may use a unit number or map position.
 
 ### `get_recipe_graph`

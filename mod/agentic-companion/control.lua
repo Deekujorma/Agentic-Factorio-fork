@@ -85,3 +85,4 @@ script.on_event(defines.events.on_entity_damaged, events.on_entity_damaged,
 script.on_event(defines.events.on_entity_died, events.on_entity_died,
   { { filter = "type", type = "character" } })
 script.on_event(defines.events.on_research_finished, events.on_research_finished)
+script.on_event(defines.events.on_rocket_launched, events.on_rocket_launched)

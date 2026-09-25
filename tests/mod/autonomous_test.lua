@@ -9,7 +9,7 @@ end
 
 _G.defines = {
   inventory = { chest = 1 },
-  entity_status = { working = 1, normal = 2 },
+  entity_status = { working = 1, normal = 2, no_power = 3, no_fuel = 4, no_ingredients = 5, full_output = 6 },
   flow_precision_index = { one_minute = 1 },
 }
 local inventory = { get_item_count = function(name) return name == "plate" and 20 or 0 end }
@@ -30,6 +30,7 @@ local force = {
 }
 package.loaded["scripts.companion"] = { get = function() return { force = force, surface = surface } end }
 _G.game = { tick = 42, connected_players = {}, forces = { player = force }, surfaces = { surface }, get_entity_by_unit_number = function() return chest end }
+_G.storage = { autonomous = { event_counts = { rocket_launched = 1 } } }
 
 local autonomous = require("scripts.autonomous")
 local verified = autonomous.verify({ checks = {
@@ -45,6 +46,21 @@ for i, result in ipairs(verified.results) do check(result.ok, "verification pred
 local graph = autonomous.recipe_graph({ item = "iron-gear-wheel", include_all = true })
 check(#graph.recipes == 1 and graph.recipes[1].ingredients[1].item == "iron-plate", "recipe graph uses running force recipes")
 check(graph.recipes[1].products[1].amount == 1, "recipe graph normalizes products")
+
+chest.status = defines.entity_status.working
+local clear = autonomous.verify({ checks = { { kind = "no_factory_blocker", area = { x = 0, y = 0, radius = 5 } } } })
+check(clear.results[1].ok == true, "no_factory_blocker passes with zero blockers")
+chest.status = defines.entity_status.no_power
+local blocked = autonomous.verify({ checks = { { kind = "no_factory_blocker", area = { x = 0, y = 0, radius = 5 } } } })
+check(blocked.results[1].ok == false and blocked.results[1].actual == 1,
+  "no_factory_blocker fails with one or more blockers")
+local launched = autonomous.verify({ checks = { { kind = "event_count", event = "rocket_launched", minimum = 1 } } })
+check(launched.results[1].ok == true, "event_count observes persisted rocket launches")
+
+force.recipes.probability = { name = "probability", category = "chemistry", energy = 1, enabled = true,
+  ingredients = {}, products = { { name = "rare", amount_min = 2, amount_max = 4, probability = 0.5, type = "item" } } }
+local probability = autonomous.recipe_graph({ item = "rare" })
+check(probability.recipes[1].products[1].amount == 1.5, "recipe graph normalizes expected probabilistic output")
 
 print(failures == 0 and "\nALL TESTS PASSED" or ("\n" .. failures .. " FAILURES"))
 os.exit(failures == 0 and 0 or 1)

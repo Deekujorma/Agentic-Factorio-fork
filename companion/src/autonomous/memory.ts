@@ -11,6 +11,8 @@ export const observedFactSchema = z.object({
   tick: z.number().int().nonnegative().optional(),
   position: z.object({ x: z.number(), y: z.number() }).optional(),
   staleAfterTick: z.number().int().nonnegative().optional(),
+  source: z.enum(["game", "model"]).default("game"),
+  confirmed: z.boolean().default(true),
 });
 export type ObservedFact = z.infer<typeof observedFactSchema>;
 
@@ -23,6 +25,7 @@ export const verificationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("production"), item: z.string(), minimumPerMinute: z.number().nonnegative() }),
   z.object({ kind: z.literal("operational"), entity: z.string(), minimum: z.number().int().positive().default(1), area: areaSchema }),
   z.object({ kind: z.literal("no_factory_blocker"), area: areaSchema, entity: z.string().optional() }),
+  z.object({ kind: z.literal("event_count"), event: z.enum(["rocket_launched"]), minimum: z.number().int().positive(), afterTick: z.number().int().nonnegative().optional() }),
   z.object({ kind: z.literal("manual"), description: z.string().min(1) }),
 ]);
 export type Verification = z.infer<typeof verificationSchema>;
@@ -32,6 +35,7 @@ export type GoalStatus = z.infer<typeof goalStatusSchema>;
 export const goalSchema = z.object({
   id: z.string().min(1),
   parentId: z.string().optional(),
+  kind: z.enum(["campaign", "strategic", "tactical"]).default("tactical"),
   title: z.string().min(1),
   description: z.string().min(1),
   status: goalStatusSchema,
@@ -59,7 +63,9 @@ export const activeJobSchema = z.object({
 export type ActiveJob = z.infer<typeof activeJobSchema>;
 
 export const autonomousMemorySchema = z.object({
-  schemaVersion: z.literal(2),
+  schemaVersion: z.literal(3),
+  rootGoalId: z.string().optional(),
+  campaignStartedTick: z.number().int().nonnegative().optional(),
   objective: z.string().nullable(),
   objectiveHistory: z.array(z.object({ objective: z.string(), at: z.string().datetime(), player: z.string().optional() })),
   goals: z.array(goalSchema),
@@ -86,7 +92,7 @@ export type AutonomousMemory = z.infer<typeof autonomousMemorySchema>;
 export function freshMemory(): AutonomousMemory {
   const now = new Date().toISOString();
   return {
-    schemaVersion: 2, objective: null, objectiveHistory: [], goals: [], knownAreas: [], productionLines: [],
+    schemaVersion: 3, objective: null, objectiveHistory: [], goals: [], knownAreas: [], productionLines: [],
     resourcePatches: [], importantEntities: [], infrastructure: [], research: [], knownBlueprints: [], blockers: [],
     decisions: [], failedApproaches: [], recentAchievements: [], nextStrategicActions: [], activeJobs: [], paused: false,
     campaignStatus: "idle", timestamps: { createdAt: now, updatedAt: now, lastCheckpointAt: now },
@@ -96,12 +102,15 @@ export function freshMemory(): AutonomousMemory {
 function migrate(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const old = value as Record<string, unknown>;
-  if (old.schemaVersion === 2 && old.campaignStatus === undefined) {
-    return { ...old, campaignStatus: old.paused ? "stopped" : "running" };
+  if (old.schemaVersion === 2) {
+    return {
+      ...old, schemaVersion: 3, campaignStatus: old.campaignStatus ?? (old.paused ? "stopped" : "running"),
+      goals: Array.isArray(old.goals) ? old.goals.map((goal) => ({ ...(goal as object), kind: "tactical" })) : [],
+    };
   }
   if (old.schemaVersion !== 1) return value;
   const now = new Date().toISOString();
-  return { ...old, schemaVersion: 2, activeJobs: [], campaignStatus: old.paused ? "stopped" : "running", stopReason: undefined, timestamps: { ...(old.timestamps as object), lastCheckpointAt: now } };
+  return { ...old, schemaVersion: 3, activeJobs: [], campaignStatus: old.paused ? "stopped" : "running", stopReason: undefined, goals: Array.isArray(old.goals) ? old.goals.map((goal) => ({ ...(goal as object), kind: "tactical" })) : [], timestamps: { ...(old.timestamps as object), lastCheckpointAt: now } };
 }
 
 export class MemoryStore {

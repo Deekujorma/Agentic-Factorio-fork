@@ -42,10 +42,11 @@ function M.verify(params)
   end
   local results = {}
   for i, check in ipairs(checks) do
-    local kind, actual, expected = check.kind, nil, nil
+    local kind, actual, expected, passed = check.kind, nil, nil, false
     if kind == "entity_count" then
       expected = math.max(0, tonumber(check.minimum) or 0)
       actual = surface.count_entities_filtered({area = area_of(check.area), name = check.entity, force = force})
+      passed = actual >= expected
     elseif kind == "inventory" then
       expected = math.max(0, tonumber(check.minimum) or 0)
       local entity
@@ -55,15 +56,18 @@ function M.verify(params)
         entity = found[1]
       end
       actual = entity and inventory_total(entity, check.item) or 0
+      passed = actual >= expected
     elseif kind == "research" then
       local technology = force.technologies[check.technology]
       actual, expected = technology ~= nil and technology.researched, true
+      passed = actual == true
     elseif kind == "production" then
       expected = math.max(0, tonumber(check.minimum_per_minute) or 0)
       actual = force.get_item_production_statistics(surface).get_flow_count({
         name = check.item, category = "input", count = true,
         precision_index = defines.flow_precision_index.one_minute,
       })
+      passed = actual >= expected
     elseif kind == "operational" then
       expected = math.max(1, tonumber(check.minimum) or 1)
       actual = 0
@@ -73,6 +77,7 @@ function M.verify(params)
           actual = actual + 1
         end
       end
+      passed = actual >= expected
     elseif kind == "no_factory_blocker" then
       actual, expected = 0, 0
       for _, entity in ipairs(surface.find_entities_filtered({area = area_of(check.area), name = check.entity, force = force})) do
@@ -82,18 +87,30 @@ function M.verify(params)
           actual = actual + 1
         end
       end
+      passed = actual == 0
+    elseif kind == "event_count" then
+      expected = math.max(1, tonumber(check.minimum) or 1)
+      local counts = storage.autonomous and storage.autonomous.event_counts or {}
+      actual = counts[check.event] or 0
+      if check.after_tick ~= nil then
+        actual = 0
+        local ticks = storage.autonomous and storage.autonomous.event_ticks and storage.autonomous.event_ticks[check.event] or {}
+        for _, tick in ipairs(ticks) do if tick >= tonumber(check.after_tick) then actual = actual + 1 end end
+      end
+      passed = actual >= expected
     else
       error("unsupported autonomous verification kind: " .. tostring(kind))
     end
-    results[i] = {kind = kind, ok = actual == true or (type(actual) == "number" and actual >= expected), actual = actual, expected = expected}
+    results[i] = {kind = kind, ok = passed, actual = actual, expected = expected}
   end
   return {tick = game.tick, results = results}
 end
 
 local function amount_of(product)
-  if product.amount then return product.amount end
-  if product.amount_min and product.amount_max then return (product.amount_min + product.amount_max) / 2 end
-  return 1
+  local amount = 1
+  if product.amount then amount = product.amount
+  elseif product.amount_min and product.amount_max then amount = (product.amount_min + product.amount_max) / 2 end
+  return amount * (product.probability or 1)
 end
 
 function M.recipe_graph(params)
