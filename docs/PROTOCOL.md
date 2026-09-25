@@ -399,7 +399,8 @@ same time.
 
 Input: `{ checks: VerificationCheck[] }` (1–32 checks). Supported checks are
 `entity_count`, `inventory`, `research`, `production`, `operational`, and
-`no_factory_blocker`, and `event_count` (currently `rocket_launched`). The blocker predicate succeeds only when the matching area contains
+`no_factory_blocker`, `companion_near_player`, and `event_count` (currently
+`rocket_launched`). The blocker predicate succeeds only when the matching area contains
 zero machines in a known blocked state.
 The method performs no mutation and returns
 `{ tick, results: [{ kind, ok, actual, expected }] }`. Event checks can include

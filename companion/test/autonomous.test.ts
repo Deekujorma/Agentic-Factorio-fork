@@ -13,6 +13,7 @@ import { AutonomousSupervisor, type CoordinatorPlan } from "../src/autonomous/su
 import { TrajectoryLog } from "../src/autonomous/trajectory.js";
 import { verifyGoal } from "../src/autonomous/verifier.js";
 import type { WorkerResult } from "../src/autonomous/worker.js";
+import { deterministicTacticalPlan, tacticalPlanSchema } from "../src/autonomous/tactical.js";
 
 const roots: string[] = [];
 const root = () => { const value = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-autonomous-")); roots.push(value); return value; };
@@ -60,6 +61,19 @@ describe("autonomous memory, goals, and deterministic helpers", () => {
     expect(store.load().objective).toBeNull(); expect(fs.readdirSync(path.dirname(store.file)).some((name) => name.includes(".corrupt-"))).toBe(true);
   });
 
+  it.each([1, 2] as const)("repairs and resumes a schema-v%s campaign with a stable root", async (version) => {
+    const directory = root(); const store = new MemoryStore(`v${version}`, directory); const memory = freshMemory();
+    memory.objective = "launch rocket"; memory.campaignStatus = "running";
+    const oldGoal = goal({ id: "legacy", status: version === 2 ? "active" : "ready" }); memory.goals = [oldGoal];
+    const raw = structuredClone(memory) as unknown as Record<string, unknown>; raw.schemaVersion = version; delete raw.rootGoalId;
+    if (version === 1) { delete raw.activeJobs; const timestamps = raw.timestamps as Record<string, unknown>; delete timestamps.lastCheckpointAt; (raw.goals as Array<Record<string, unknown>>).forEach((value) => delete value.kind); }
+    fs.mkdirSync(path.dirname(store.file), { recursive: true }); fs.writeFileSync(store.file, JSON.stringify(raw));
+    const loaded = store.load(); const rootGoal = loaded.goals.find((value) => value.kind === "campaign");
+    expect(rootGoal).toBeDefined(); expect(loaded.rootGoalId).toBe(rootGoal!.id); expect(loaded.goals.find((value) => value.id === "legacy")).toMatchObject({ parentId: rootGoal!.id, status: "ready" });
+    const supervisor = new AutonomousSupervisor(fakeBridge().bridge, {} as never, { key: `v${version}`, workers: 1, memoryRoot: directory, brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => completed() });
+    await supervisor.start(); await supervisor.whenIdle(); expect(supervisor.snapshot().rootGoalId).toBe(rootGoal!.id); supervisor.dispose();
+  });
+
   it("enforces dependencies, centralized recovery, and hierarchy", () => {
     const memory = freshMemory(); const graph = new GoalGraph(memory);
     const rootGoal = graph.create({ id: "root", kind: "campaign", title: "Rocket" }); graph.recover(rootGoal.id, "active");
@@ -97,6 +111,11 @@ describe("player intent routing", () => {
     ["stop working on oil", "modify"], ["forget the rocket, build defenses instead", "replace"], ["continue", "resume"],
   ] as const)("routes %s as %s", (message, kind) => expect(deterministicIntent(message, true)?.kind).toBe(kind));
 
+  it("requires deterministic evidence for physical tactical plans", () => {
+    expect(deterministicTacticalPlan("come here")?.verification).toEqual([{ kind: "companion_near_player", maximumDistance: 5 }]);
+    expect(() => tacticalPlanSchema.parse({ title: "move", description: "move", physical: true, expectedInputs: [], expectedOutput: "moved", definitionOfDone: "moved", verification: [{ kind: "manual", description: "model says so" }] })).toThrow(/deterministic verification/);
+  });
+
   it("answers questions and tactical requests without replacing the campaign", async () => {
     const harness = fakeBridge(); const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, {
       key: "chat", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => ({ ...completed(), status: "blocked", blocker: "awaiting player" }),
@@ -107,6 +126,17 @@ describe("player intent routing", () => {
     await supervisor.handleChat({ id: 2, tick: 2, player: "P", text: "how is it going?" });
     await supervisor.handleChat({ id: 3, tick: 3, player: "P", text: "come here" }); await supervisor.whenIdle();
     expect(supervisor.snapshot().objective).toBe(objective); expect(harness.calls.filter((call) => call.method === "cancel").length).toBe(cancelCount + 1); supervisor.dispose();
+  });
+
+  it("never creates a physical tactical goal backed only by worker prose", async () => {
+    const harness = fakeBridge(); const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, {
+      key: "unsafe-tactical", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => completed(),
+      intentClassifier: async () => ({ kind: "tactical", summary: "move", target: null }),
+      tacticalPlanner: async () => ({ title: "Move", description: "move physically", physical: true, expectedInputs: [], expectedOutput: "moved", definitionOfDone: "moved", verification: [{ kind: "manual", description: "worker says moved" }] }),
+    });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "launch" }); await supervisor.whenIdle();
+    await supervisor.handleChat({ id: 2, tick: 2, player: "P", text: "move somehow" });
+    expect(supervisor.snapshot().goals.filter((value) => value.kind === "tactical")).toEqual([]); expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("safely verifiable"))).toBe(true); supervisor.dispose();
   });
 
   it("modifies only a matching subtree, replaces explicitly, resumes, and fails classification safely", async () => {
@@ -171,16 +201,19 @@ describe("structured worker lifecycle and campaign completion", () => {
     expect(supervisor.snapshot().campaignStatus).toBe("completed"); expect(supervisor.snapshot().goals.find((value) => value.kind === "campaign")?.status).toBe("done"); supervisor.dispose();
   });
 
-  it("persists root/strategic/tactical hierarchy and confirmed/unconfirmed discoveries across restart", async () => {
+  it("keeps strategic goals open across incremental waves until explicitly completed", async () => {
     const memoryRoot = root(); const brokerRoot = root(); const harness = fakeBridge();
     const result: WorkerResult = { ...completed(), discoveries: [{ category: "resourcePatch", summary: "iron near base", position: { x: 4, y: 5 } }, { category: "blueprint", summary: "Power book" }] };
-    const science: CoordinatorPlan = { decision: "science wave", objectiveComplete: false, campaignVerification: [], strategicGoals: [{ title: "Science", description: "Science chain", priority: 8 }], goals: [{ ...wave("Inspect science").goals[0]!, title: "Inspect science", parentTitle: "Science" }] };
-    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "hierarchy", workers: 1, memoryRoot, brokerRoot, coordinatorGenerate: sequence(wave(), science, blockedPlan()), workerGenerate: async () => result });
+    const red: CoordinatorPlan = { decision: "red wave", objectiveComplete: false, campaignVerification: [], strategicGoals: [{ title: "Science", description: "All required science", priority: 8 }], goals: [{ ...wave("Red science").goals[0]!, title: "Red science", parentTitle: "Science" }] };
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "hierarchy", workers: 1, memoryRoot, brokerRoot, coordinatorGenerate: sequence(red, blockedPlan()), workerGenerate: async () => result });
     await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "launch rocket" }); await supervisor.whenIdle();
-    const first = supervisor.snapshot(); const rootGoal = first.goals.find((value) => value.kind === "campaign")!; const strategic = first.goals.find((value) => value.kind === "strategic")!; const tactical = first.goals.find((value) => value.kind === "tactical")!;
-    expect(first.goals.filter((value) => value.kind === "strategic")).toHaveLength(2); expect(strategic.parentId).toBe(rootGoal.id); expect(tactical.parentId).toBe(strategic.id); expect(first.resourcePatches.some((value) => value.source === "model" && !value.confirmed)).toBe(true); expect(first.knownBlueprints.some((value) => value.source === "game" && value.confirmed)).toBe(true); supervisor.dispose();
-    const resumed = new AutonomousSupervisor(harness.bridge, {} as never, { key: "hierarchy", workers: 1, memoryRoot, brokerRoot, coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => completed() }); await resumed.start();
-    expect(resumed.snapshot().goals.find((value) => value.id === tactical.id)?.parentId).toBe(strategic.id); resumed.dispose();
+    const first = supervisor.snapshot(); const rootGoal = first.goals.find((value) => value.kind === "campaign")!; const science = first.goals.find((value) => value.title === "Science")!; const redGoal = first.goals.find((value) => value.title === "Red science")!;
+    expect(science.status).toBe("active"); expect(redGoal.status).toBe("done"); expect(redGoal.parentId).toBe(science.id); supervisor.dispose();
+    const green: CoordinatorPlan = { decision: "green wave", objectiveComplete: false, campaignVerification: [], strategicGoals: [{ title: "Science", description: "All required science", priority: 8 }], goals: [{ ...wave("Green science").goals[0]!, title: "Green science", parentTitle: "Science" }] };
+    const closeScience: CoordinatorPlan = { decision: "science complete", objectiveComplete: false, campaignVerification: [], strategicGoals: [], goals: [], completeStrategicGoals: ["Science"] };
+    const resumed = new AutonomousSupervisor(harness.bridge, {} as never, { key: "hierarchy", workers: 1, memoryRoot, brokerRoot, coordinatorGenerate: sequence(green, closeScience), workerGenerate: async () => result }); await resumed.start(); await resumed.handleChat({ id: 2, tick: 2, player: "P", text: "continue" }); await resumed.whenIdle();
+    const second = resumed.snapshot(); const sameScience = second.goals.find((value) => value.title === "Science")!; const greenGoal = second.goals.find((value) => value.title === "Green science")!;
+    expect(sameScience.id).toBe(science.id); expect(greenGoal.parentId).toBe(science.id); expect(sameScience.status).toBe("done"); expect(sameScience.parentId).toBe(rootGoal.id); expect(second.resourcePatches.some((value) => value.source === "model" && !value.confirmed)).toBe(true); resumed.dispose();
   });
 
   it("renews ownership and releases reservation after completion", async () => {

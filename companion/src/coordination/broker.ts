@@ -345,6 +345,19 @@ export class CoordinationBroker {
     });
   }
 
+  async assertWithinActiveReservation(agentId: string, targets: Array<{ x: number; y: number; radius?: number }>): Promise<void> {
+    await this.mutate((state) => {
+      this.touchAgent(state, agentId);
+      const reservations = Object.values(state.reservations).filter((value) => value.agentId === agentId);
+      if (reservations.length === 0) return;
+      for (const target of targets) {
+        if (!reservations.some((reservation) => Math.hypot(target.x - reservation.center.x, target.y - reservation.center.y) + (target.radius ?? 0) <= reservation.radius)) {
+          throw new Error(`target (${target.x}, ${target.y}) is outside the worker's active reservation`);
+        }
+      }
+    });
+  }
+
   async releaseArea(agentId: string, reservationId: string): Promise<void> {
     await this.mutate((state) => {
       const reservation = state.reservations[reservationId];

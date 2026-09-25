@@ -26,6 +26,7 @@ export const verificationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("operational"), entity: z.string(), minimum: z.number().int().positive().default(1), area: areaSchema }),
   z.object({ kind: z.literal("no_factory_blocker"), area: areaSchema, entity: z.string().optional() }),
   z.object({ kind: z.literal("event_count"), event: z.enum(["rocket_launched"]), minimum: z.number().int().positive(), afterTick: z.number().int().nonnegative().optional() }),
+  z.object({ kind: z.literal("companion_near_player"), player: z.string().optional(), maximumDistance: z.number().positive().max(32) }),
   z.object({ kind: z.literal("manual"), description: z.string().min(1) }),
 ]);
 export type Verification = z.infer<typeof verificationSchema>;
@@ -113,6 +114,32 @@ function migrate(value: unknown): unknown {
   return { ...old, schemaVersion: 3, activeJobs: [], campaignStatus: old.paused ? "stopped" : "running", stopReason: undefined, goals: Array.isArray(old.goals) ? old.goals.map((goal) => ({ ...(goal as object), kind: "tactical" })) : [], timestamps: { ...(old.timestamps as object), lastCheckpointAt: now } };
 }
 
+function normalizeCampaign(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const memory = value as Record<string, unknown>; const objective = memory.objective;
+  if (typeof objective !== "string" || objective.length === 0) return value;
+  const goals = Array.isArray(memory.goals) ? memory.goals as Array<Record<string, unknown>> : [];
+  const currentRoot = typeof memory.rootGoalId === "string" ? goals.find((goal) => goal.id === memory.rootGoalId && goal.kind === "campaign") : undefined;
+  if (currentRoot) return value;
+  let id = "campaign-root-migrated"; let suffix = 1;
+  while (goals.some((goal) => goal.id === id)) id = `campaign-root-migrated-${suffix++}`;
+  const timestamps = memory.timestamps as { createdAt?: string; updatedAt?: string } | undefined; const now = new Date().toISOString();
+  const campaignStatus = memory.campaignStatus;
+  goals.push({
+    id, kind: "campaign", title: objective, description: objective,
+    status: campaignStatus === "completed" ? "done" : "active", priority: 100, dependencies: [],
+    createdAt: timestamps?.createdAt ?? now, updatedAt: timestamps?.updatedAt ?? now,
+    attempts: 0, maxAttempts: 3, blockers: [], verification: [], evidence: ["campaign root repaired during memory migration"],
+  });
+  for (const goal of goals) if (goal.id !== id && goal.parentId === undefined) goal.parentId = id;
+  const activeGoalIds = new Set(Array.isArray(memory.activeJobs) ? (memory.activeJobs as Array<Record<string, unknown>>).map((job) => job.goalId) : []);
+  for (const goal of goals) if (goal.id !== id && goal.kind === "tactical" && goal.status === "active" && !activeGoalIds.has(goal.id)) {
+    goal.status = "ready"; goal.updatedAt = now; goal.evidence = [...(Array.isArray(goal.evidence) ? goal.evidence : []), "orphaned active goal recovered during memory migration"];
+  }
+  memory.goals = goals; memory.rootGoalId = id;
+  return memory;
+}
+
 export class MemoryStore {
   readonly file: string;
   constructor(readonly key: string, root = path.join(configDir(), "autonomous")) {
@@ -120,7 +147,7 @@ export class MemoryStore {
   }
   load(): AutonomousMemory {
     try {
-      return autonomousMemorySchema.parse(migrate(JSON.parse(fs.readFileSync(this.file, "utf8"))));
+      return autonomousMemorySchema.parse(normalizeCampaign(migrate(JSON.parse(fs.readFileSync(this.file, "utf8")))));
     } catch (error) {
       if (fs.existsSync(this.file)) {
         const backup = `${this.file}.corrupt-${Date.now()}`;

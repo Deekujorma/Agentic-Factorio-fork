@@ -66,7 +66,8 @@ strategic children and tactical leaves. A coordinator completion proposal is
 accepted only after the root's non-manual, read-only game verification passes.
 
 Autonomous action tools are foreground-only. Persistent duties and player chat
-tools are hidden from workers; construction calls are constrained to the
+tools, including the asynchronous generic `run_plan`, are hidden from workers;
+construction calls are constrained to the
 worker's broker reservation. Worker heartbeats renew claims, companion leases,
 and reservations, and termination cancels that companion's outstanding tasks
 before releasing ownership.

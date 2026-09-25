@@ -98,6 +98,20 @@ function M.verify(params)
         for _, tick in ipairs(ticks) do if tick >= tonumber(check.after_tick) then actual = actual + 1 end end
       end
       passed = actual >= expected
+    elseif kind == "companion_near_player" then
+      expected = math.max(1, tonumber(check.maximum_distance) or 5)
+      actual = 1000000000
+      local player = check.player and game.get_player(check.player) or game.connected_players[1]
+      if player then
+        for _, record in pairs(storage.companions or {}) do
+          local entity = record.entity
+          if entity and entity.valid and entity.surface == player.surface then
+            local dx, dy = entity.position.x - player.position.x, entity.position.y - player.position.y
+            actual = math.min(actual, math.sqrt(dx * dx + dy * dy))
+          end
+        end
+      end
+      passed = actual <= expected
     else
       error("unsupported autonomous verification kind: " .. tostring(kind))
     end

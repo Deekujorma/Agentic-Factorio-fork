@@ -13,6 +13,7 @@ import { AutonomousWorker, defaultWorkerGenerate, type WorkerGenerate, type Work
 import { BridgeVerificationReader, verifyGoal, type VerificationReader } from "./verifier.js";
 import { defaultIntentClassifier, type IntentClassifier, type PlayerIntent } from "./intent.js";
 import { productionPlansForStrategy } from "./productionPlanner.js";
+import { defaultTacticalPlanner, tacticalPlanSchema, type TacticalPlanner } from "./tactical.js";
 
 const plannedGoalSchema = z.object({
   title: z.string().min(1), description: z.string().min(1), priority: z.number().int().min(-100).max(100).default(0),
@@ -24,10 +25,11 @@ const plannedGoalSchema = z.object({
 }).superRefine((goal, context) => {
   if (/\b(build|construct|place|deconstruct|blueprint)\b/i.test(goal.description) && !goal.area) context.addIssue({ code: "custom", message: "construction tactical goals require an area", path: ["area"] });
 });
-const strategicGoalSchema = z.object({ title: z.string().min(1), description: z.string().min(1), parentTitle: z.string().optional(), priority: z.number().int().min(-100).max(100).default(0) });
+const strategicGoalSchema = z.object({ title: z.string().min(1), description: z.string().min(1), parentTitle: z.string().optional(), priority: z.number().int().min(-100).max(100).default(0), verification: z.array(verificationSchema).default([]) });
 const coordinatorPlanSchema = z.object({
   decision: z.string().min(1), goals: z.array(plannedGoalSchema).max(3),
   strategicGoals: z.array(strategicGoalSchema).max(20).default([]), campaignVerification: z.array(verificationSchema).default([]),
+  completeStrategicGoals: z.array(z.string()).max(20).default([]),
   objectiveComplete: z.boolean().default(false), blockedReason: z.string().nullable().optional().transform((value) => value ?? undefined), playerMessage: z.string().max(400).nullable().optional().transform((value) => value ?? undefined),
 }).refine((plan) => new Set(plan.goals.map((goal) => goal.title)).size === plan.goals.length, "goal titles must be unique within a wave");
 export type CoordinatorPlan = z.infer<typeof coordinatorPlanSchema>;
@@ -46,6 +48,7 @@ export interface AutonomousSupervisorOptions {
   memoryRoot?: string; brokerRoot?: string; coordinatorGenerate?: CoordinatorGenerate;
   workerGenerate?: WorkerGenerate; verificationReader?: VerificationReader;
   intentClassifier?: IntentClassifier; workerRenewalMs?: number;
+  tacticalPlanner?: TacticalPlanner;
 }
 
 export class AutonomousSupervisor {
@@ -58,6 +61,7 @@ export class AutonomousSupervisor {
   private readonly workerGenerate: WorkerGenerate;
   private readonly verifier: VerificationReader;
   private readonly intentClassifier: IntentClassifier;
+  private readonly tacticalPlanner: TacticalPlanner;
   private readonly continuationMs: number;
   private readonly modelTimeoutMs: number;
   private readonly workerRenewalMs: number;
@@ -84,6 +88,7 @@ export class AutonomousSupervisor {
     this.workerGenerate = opts.workerGenerate ?? defaultWorkerGenerate;
     this.verifier = opts.verificationReader ?? new BridgeVerificationReader(bridge);
     this.intentClassifier = opts.intentClassifier ?? defaultIntentClassifier;
+    this.tacticalPlanner = opts.tacticalPlanner ?? defaultTacticalPlanner;
     this.continuationMs = Math.max(5_000, opts.continuationMs ?? 20_000);
     this.modelTimeoutMs = Math.max(20, opts.modelTimeoutMs ?? 5 * 60_000);
     this.workerRenewalMs = Math.max(20, opts.workerRenewalMs ?? 30_000);
@@ -183,8 +188,21 @@ export class AutonomousSupervisor {
 
   private async addTacticalInstruction(message: ChatMessage): Promise<void> {
     if (!this.memory.rootGoalId) { await this.replaceObjective(message); return; }
+    const controller = this.modelController();
+    let plan;
+    try { plan = tacticalPlanSchema.parse(await this.tacticalPlanner({ model: this.model, message: message.text, signal: controller.signal })); }
+    catch (error) {
+      await this.bridge.call("say", { text: "I couldn't derive a safely verifiable tactical job, so I left the campaign unchanged." }).catch(() => undefined);
+      this.trajectory.append({ type: "tactical_plan_rejected", tick: message.tick, data: { message: message.text, error: String(error) } });
+      return;
+    } finally { this.releaseController(controller); }
     this.memory.paused = false; this.memory.campaignStatus = "running";
-    const goal = this.graph.create({ kind: "tactical", parentId: this.memory.rootGoalId, title: `Player request: ${message.text}`, description: message.text, priority: 100, verification: [{ kind: "manual", description: "bounded player-request action completed" }], job: { expectedInputs: [], expectedOutput: message.text, definitionOfDone: message.text } });
+    const goal = this.graph.create({ kind: "tactical", parentId: this.memory.rootGoalId, title: plan.title, description: plan.description, priority: 100, verification: plan.verification, job: { area: plan.area, expectedInputs: plan.expectedInputs, expectedOutput: plan.expectedOutput, definitionOfDone: plan.definitionOfDone } });
+    if (!plan.physical) {
+      this.graph.transition(goal.id, "active"); this.graph.transition(goal.id, "verifying"); this.graph.transition(goal.id, "done", "informational tactical request");
+      await this.bridge.call("say", { text: plan.expectedOutput }).catch(() => undefined);
+      this.checkpoint("informational_tactical_request", { text: message.text }, message.tick, goal.id); return;
+    }
     this.checkpoint("tactical_override", { text: message.text }, message.tick, goal.id); this.requestWake("tactical_instruction");
   }
 
@@ -293,6 +311,7 @@ export class AutonomousSupervisor {
       if (!parentId) throw new Error(`strategic goal ${strategic.title} has unknown parent`);
       const existing = this.memory.goals.find((goal) => goal.kind === "strategic" && goal.title === strategic.title && goal.parentId === parentId);
       const goal = existing ?? this.graph.create({ kind: "strategic", parentId, title: strategic.title, description: strategic.description, priority: strategic.priority });
+      if (strategic.verification?.length) this.graph.update(goal.id, { verification: strategic.verification });
       if (goal.status === "pending") this.graph.recover(goal.id, "active");
       ids.set(goal.title, goal.id);
     }
@@ -317,6 +336,7 @@ export class AutonomousSupervisor {
       }
     }
     this.graph.refreshReady();
+    await this.completeProposedStrategicGoals(plan.completeStrategicGoals ?? []);
   }
 
   private async dispatchReady(): Promise<void> {
@@ -395,7 +415,6 @@ export class AutonomousSupervisor {
       if (verification.ok) {
         this.graph.transition(goal.id, "done", result.summary); goal.result = result.summary;
         this.memory.recentAchievements.push(goal.title);
-        this.completeSatisfiedParents(goal.parentId);
         this.trajectory.append({ type: "goal_completed", goalId: goal.id, jobId: job.id });
       } else {
         goal.blockers = ["deterministic verification failed"];
@@ -428,14 +447,19 @@ export class AutonomousSupervisor {
     this.trajectory.append({ type: "replanning", goalId: goal.id, jobId: event?.jobId, data: { error, attempts: goal.attempts } });
   }
 
-  private completeSatisfiedParents(parentId: string | undefined): void {
-    if (!parentId || parentId === this.memory.rootGoalId) return;
-    const parent = this.graph.get(parentId); if (!parent || parent.kind !== "strategic") return;
-    const children = this.memory.goals.filter((goal) => goal.parentId === parent.id);
-    if (children.length > 0 && children.every((goal) => goal.status === "done")) {
-      this.graph.recover(parent.id, "active"); this.graph.transition(parent.id, "verifying");
-      this.graph.transition(parent.id, "done", `all ${children.length} child goals completed`);
-      this.completeSatisfiedParents(parent.parentId);
+  private async completeProposedStrategicGoals(titles: string[]): Promise<void> {
+    for (const title of titles) {
+      const goal = this.memory.goals.find((candidate) => candidate.kind === "strategic" && candidate.title === title && candidate.status !== "done");
+      if (!goal) continue;
+      const children = this.memory.goals.filter((candidate) => candidate.parentId === goal.id);
+      const prerequisitesDone = children.length > 0 && children.every((child) => child.status === "done") && goal.dependencies.every((id) => this.graph.get(id)?.status === "done");
+      if (!prerequisitesDone) { goal.evidence.push("strategic completion rejected: unfinished child or dependency"); continue; }
+      if (goal.verification.length > 0) {
+        const outcome = await verifyGoal(goal, this.verifier, this.memory.goals); goal.evidence.push(...outcome.evidence);
+        if (!outcome.ok) continue;
+      }
+      this.graph.recover(goal.id, "active"); this.graph.transition(goal.id, "verifying"); this.graph.transition(goal.id, "done", "coordinator explicitly completed strategic goal");
+      this.trajectory.append({ type: "strategic_goal_completed", goalId: goal.id, data: { title } });
     }
   }
 

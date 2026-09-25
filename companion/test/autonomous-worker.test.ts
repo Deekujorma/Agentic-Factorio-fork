@@ -24,7 +24,7 @@ async function setup() {
 
 describe("autonomous worker tool safety", () => {
   it("hides player chat and background/companion controls", async () => {
-    const { tools } = await setup(); expect(tools.say).toBeUndefined(); expect(tools.stop).toBeUndefined(); expect(tools.respawn).toBeUndefined();
+    const { tools } = await setup(); expect(tools.say).toBeUndefined(); expect(tools.stop).toBeUndefined(); expect(tools.respawn).toBeUndefined(); expect(tools.run_plan).toBeUndefined();
     expect(await tools.place_entity.inputSchema.safeParseAsync({ item: "belt", x: 0, y: 0, background: true })).toMatchObject({ success: false });
     expect(await tools.place_entity.inputSchema.safeParseAsync({ item: "belt", x: 0, y: 0, companion: "Other" })).toMatchObject({ success: false });
   });
@@ -46,5 +46,19 @@ describe("autonomous worker tool safety", () => {
     const { broker, worker, tools } = await setup(); const reservation = (await broker.snapshot()).reservations[0]!; await broker.releaseArea(worker.id, reservation.id);
     await expect(tools.craft_items.execute({ recipe: "iron-gear-wheel", count: 1 })).resolves.toBe("done");
     await expect(tools.place_entity.execute({ item: "transport-belt", x: 0, y: 0 })).rejects.toThrow(/requires an active area reservation/);
+  });
+
+  it("constrains explicit-position entity mutations and positional mining when reserved", async () => {
+    const { tools } = await setup();
+    for (const [name, inside, outside] of [
+      ["set_recipe", { x: 1, y: 1, recipe: "iron-gear-wheel" }, { x: 20, y: 20, recipe: "iron-gear-wheel" }],
+      ["rotate_entity", { x: 1, y: 1 }, { x: 20, y: 20 }],
+      ["insert_items", { x: 1, y: 1, items: { coal: 1 } }, { x: 20, y: 20, items: { coal: 1 } }],
+      ["extract_items", { x: 1, y: 1, all: true }, { x: 20, y: 20, all: true }],
+      ["mine", { x: 1, y: 1 }, { x: 20, y: 20 }],
+    ] as const) {
+      await expect(tools[name].execute(inside)).resolves.toBe("done");
+      await expect(tools[name].execute(outside)).rejects.toThrow(/outside/);
+    }
   });
 });

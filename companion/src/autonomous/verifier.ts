@@ -21,6 +21,7 @@ function toRpcCheck(value: Verification): RpcCheck | null {
     case "operational": return { kind: value.kind, entity: value.entity, minimum: value.minimum, area: value.area };
     case "no_factory_blocker": return { kind: value.kind, entity: value.entity, area: value.area };
     case "event_count": return { kind: value.kind, event: value.event, minimum: value.minimum, after_tick: value.afterTick };
+    case "companion_near_player": return { kind: value.kind, player: value.player, maximum_distance: value.maximumDistance };
   }
 }
 

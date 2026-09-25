@@ -7,8 +7,9 @@ import { toolSpecs } from "../tools/definitions.js";
 import { AUTONOMOUS_WORKER_PROMPT } from "./prompts.js";
 
 const READ_ONLY = new Set(["look_around", "view_area", "check_inventory", "inspect_entity", "scan_area", "describe_prototype", "analyze_factory", "can_place", "find_buildable_area", "list_blueprints", "read_blueprint", "list_trains", "plan_production"]);
-const FORBIDDEN = new Set(["say", "respawn", "stop", "follow_player", "keep_fueled", "defend_area"]);
+const FORBIDDEN = new Set(["say", "respawn", "stop", "follow_player", "keep_fueled", "defend_area", "run_plan"]);
 const SPATIAL_MUTATIONS = new Set(["place_entity", "build_plan", "build_blueprint", "deconstruct"]);
+const RESERVATION_SCOPED_MUTATIONS = new Set(["set_recipe", "rotate_entity", "insert_items", "extract_items", "mine"]);
 
 export const workerDiscoverySchema = z.object({
   category: z.enum(["knownArea", "resourcePatch", "productionLine", "importantEntity", "infrastructure", "research", "blueprint"]),
@@ -44,6 +45,8 @@ function spatialTargets(name: string, input: Record<string, unknown>): Array<{ x
   if (name === "build_plan") return Array.isArray(input.steps) ? input.steps.map((step) => ({ x: Number((step as Record<string, unknown>).x), y: Number((step as Record<string, unknown>).y) })) : [];
   if (name === "build_blueprint") return [{ x: Number(input.anchor_x), y: Number(input.anchor_y) }];
   if (name === "deconstruct") return [{ x: Number(input.x), y: Number(input.y), radius: typeof input.area_radius === "number" ? input.area_radius : 0 }];
+  if (["set_recipe", "rotate_entity", "insert_items", "extract_items"].includes(name)) return [{ x: Number(input.x), y: Number(input.y) }];
+  if (name === "mine" && typeof input.x === "number" && typeof input.y === "number") return [{ x: input.x, y: input.y }];
   return [];
 }
 
@@ -65,6 +68,9 @@ export function buildWorkerTools(bridge: Bridge, broker: CoordinationBroker, age
             targets.push({ x: x + blueprint.size.w, y }, { x, y: y + blueprint.size.h }, { x: x + blueprint.size.w, y: y + blueprint.size.h });
           }
           await broker.assertWithinReservation(agentId, targets);
+        } else if (RESERVATION_SCOPED_MUTATIONS.has(spec.name)) {
+          const targets = spatialTargets(spec.name, input);
+          if (targets.length > 0) await broker.assertWithinActiveReservation(agentId, targets);
         }
         return spec.execute(bridge, { ...input, agent_id: agentId, companion, background: false });
       },

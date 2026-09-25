@@ -29,8 +29,9 @@ local force = {
   },
 }
 package.loaded["scripts.companion"] = { get = function() return { force = force, surface = surface } end }
-_G.game = { tick = 42, connected_players = {}, forces = { player = force }, surfaces = { surface }, get_entity_by_unit_number = function() return chest end }
-_G.storage = { autonomous = { event_counts = { rocket_launched = 1 } } }
+local player = { name = "Player", position = { x = 0, y = 0 }, surface = surface }
+_G.game = { tick = 42, connected_players = { player }, forces = { player = force }, surfaces = { surface }, get_entity_by_unit_number = function() return chest end, get_player = function() return player end }
+_G.storage = { autonomous = { event_counts = { rocket_launched = 1 } }, companions = { Ada = { entity = { valid = true, position = { x = 3, y = 4 }, surface = surface } } } }
 
 local autonomous = require("scripts.autonomous")
 local verified = autonomous.verify({ checks = {
@@ -56,6 +57,8 @@ check(blocked.results[1].ok == false and blocked.results[1].actual == 1,
   "no_factory_blocker fails with one or more blockers")
 local launched = autonomous.verify({ checks = { { kind = "event_count", event = "rocket_launched", minimum = 1 } } })
 check(launched.results[1].ok == true, "event_count observes persisted rocket launches")
+local nearby = autonomous.verify({ checks = { { kind = "companion_near_player", maximum_distance = 5 } } })
+check(nearby.results[1].ok == true and nearby.results[1].actual == 5, "companion_near_player uses physical distance")
 
 force.recipes.probability = { name = "probability", category = "chemistry", energy = 1, enabled = true,
   ingredients = {}, products = { { name = "rare", amount_min = 2, amount_max = 4, probability = 0.5, type = "item" } } }
