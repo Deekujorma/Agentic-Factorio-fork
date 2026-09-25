@@ -213,7 +213,7 @@ end
 -- --------------------------------------------------------------- progress
 
 local function summary(task)
-  local s = string.format("placed %d/%d", task._placed, #task.steps)
+  local s = string.format("requested %d, placed %d, failed %d", #task.steps, task._placed, #task._failures)
   if task._auto_crafted > 0 then
     s = s .. string.format(" (prepared %d missing building item%s)",
       task._auto_crafted, task._auto_crafted == 1 and "" or "s")
@@ -233,11 +233,16 @@ local function summary(task)
 end
 
 local function finished(task)
-  if task._placed == 0 then
+  -- Partial construction is useful evidence, but is not successful completion:
+  -- autonomous callers must inspect and repair every failed step.
+  if #task._failures > 0 then
     return { status = "failed", detail = summary(task) }
   end
   return { status = "done", detail = summary(task) }
 end
+
+-- Pure result helper exported for offline protocol-semantics tests only.
+M._result_for_test = finished
 
 -- Record the current step's outcome and move to the next. Returns the task
 -- result when the plan is over (or stop_on_error tripped), else nil.
