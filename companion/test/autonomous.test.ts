@@ -14,6 +14,8 @@ import { TrajectoryLog } from "../src/autonomous/trajectory.js";
 import { verifyGoal } from "../src/autonomous/verifier.js";
 import type { WorkerResult } from "../src/autonomous/worker.js";
 import { deterministicTacticalPlan, tacticalPlanSchema } from "../src/autonomous/tactical.js";
+import { resolveCoordinatorPlan } from "../src/autonomous/planResolver.js";
+import { shouldSpawnGenericCompanion } from "../src/autonomous/startup.js";
 
 const roots: string[] = [];
 const root = () => { const value = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-autonomous-")); roots.push(value); return value; };
@@ -148,6 +150,23 @@ describe("player intent routing", () => {
     supervisor.dispose();
   });
 
+  it("executes a first tactical command without creating a strategic campaign", async () => {
+    const harness = fakeBridge(); let coordinatorCalls = 0; let packetCheck: unknown;
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, {
+      key: "direct-command", workers: 1, memoryRoot: root(), brokerRoot: root(),
+      coordinatorGenerate: async () => { coordinatorCalls++; return blockedPlan(); },
+      workerGenerate: async ({ packet }) => { packetCheck = packet.verification[0]; return completed(); },
+      verificationReader: { verify: async () => ({ tick: 12, results: [{ kind: "companion_near_player", ok: true, actual: 3, expected: 5 }] }) },
+      intentClassifier: async ({ message }) => deterministicIntent(message, false)!,
+    });
+    await supervisor.start(); await supervisor.handleChat({ id: 1, tick: 1, player: "P", text: "come here" }); await supervisor.whenIdle();
+    const state = supervisor.snapshot();
+    expect(packetCheck).toMatchObject({ companion: "Ada", player: "P" }); expect(coordinatorCalls).toBe(0);
+    expect(state.objective).toBeNull(); expect(state.rootGoalId).toBeUndefined(); expect(state.campaignStatus).toBe("idle");
+    expect(state.goals.some((value) => value.kind === "strategic" || value.kind === "campaign")).toBe(false);
+    expect(state.goals.find((value) => value.kind === "tactical")?.status).toBe("done"); supervisor.dispose();
+  });
+
   it("never creates a physical tactical goal backed only by worker prose", async () => {
     const harness = fakeBridge(); const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, {
       key: "unsafe-tactical", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => completed(),
@@ -171,6 +190,58 @@ describe("player intent routing", () => {
     await supervisor.handleChat({ id: 2, tick: 2, player: "P", text: "continue" }); expect(supervisor.snapshot().campaignStatus).toBe("running");
     fail = true; const before = supervisor.snapshot().objective; await supervisor.handleChat({ id: 3, tick: 3, player: "P", text: "ambiguous words" }); expect(supervisor.snapshot().objective).toBe(before);
     fail = false; await supervisor.handleChat({ id: 4, tick: 4, player: "P", text: "forget the rocket, build defenses instead" }); expect(supervisor.snapshot().objective).toContain("defenses"); supervisor.dispose();
+  });
+});
+
+describe("coordinator semantic plan resolution", () => {
+  const strategic = (title: string, parentTitle?: string) => ({ title, description: title, priority: 1, verification: [], parentTitle });
+  const campaignMemory = (title = "Automate iron plate production.") => {
+    const memory = freshMemory(); memory.objective = title; const graph = new GoalGraph(memory);
+    const rootGoal = graph.create({ id: "campaign-id", kind: "campaign", title }); graph.recover(rootGoal.id, "active"); memory.rootGoalId = rootGoal.id; return memory;
+  };
+
+  it.each([undefined, "Automate iron plate production", "AUTOMATE IRON PLATE PRODUCTION.", "root", "campaign", "campaign-id"])("resolves top-level root alias %s", (parentTitle) => {
+    const resolved = resolveCoordinatorPlan(campaignMemory(), { strategicGoals: [strategic("Smelting", parentTitle)], goals: [] });
+    expect(resolved.strategic[0]?.parentId).toBe("campaign-id");
+  });
+
+  it("topologically resolves a child before its proposed parent", () => {
+    const resolved = resolveCoordinatorPlan(campaignMemory(), { strategicGoals: [strategic("Furnaces", "Smelting"), strategic("Smelting")], goals: [] });
+    expect(resolved.strategic.map((value) => value.input.title)).toEqual(["Smelting", "Furnaces"]);
+    expect(resolved.strategic[1]?.parentId).toBe(resolved.strategic[0]?.id);
+  });
+
+  it.each([
+    ["unknown", [strategic("Furnaces", "Completely nonexistent branch")]],
+    ["self", [strategic("Smelting", "Smelting")]],
+    ["cycle", [strategic("A", "B"), strategic("B", "A")]],
+  ])("rejects %s parent graphs without mutation", (_name, strategicGoals) => {
+    const memory = campaignMemory(); const before = structuredClone(memory.goals);
+    expect(() => resolveCoordinatorPlan(memory, { strategicGoals: strategicGoals as ReturnType<typeof strategic>[], goals: [] })).toThrow();
+    expect(memory.goals).toEqual(before);
+  });
+
+  it("repairs once, rejects a second unknown parent, and never speaks rejected progress", async () => {
+    const harness = fakeBridge(); let calls = 0; const contexts: string[] = [];
+    const invalid: CoordinatorPlan = { decision: "start", objectiveComplete: false, campaignVerification: [], completeStrategicGoals: [], goals: [], strategicGoals: [strategic("Smelting", "Completely nonexistent branch")], playerMessage: "Kicking off iron automation..." };
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "semantic-reject", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: async ({ context }) => { calls++; contexts.push(context); return invalid; }, workerGenerate: async () => completed() });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "Automate iron plate production." }); await supervisor.whenIdle();
+    const state = supervisor.snapshot(); expect(calls).toBe(2); expect(contexts[1]).toContain("unknown parent Completely nonexistent branch"); expect(state.campaignStatus).toBe("blocked");
+    expect(state.goals.filter((value) => value.kind !== "campaign")).toEqual([]);
+    expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("Kicking off"))).toBe(false);
+    expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("not started any new work"))).toBe(true);
+    supervisor.dispose();
+  });
+
+  it("accepts the observed punctuation-mismatched root parent", async () => {
+    const harness = fakeBridge(); const plan: CoordinatorPlan = { decision: "start", objectiveComplete: false, campaignVerification: [], completeStrategicGoals: [], goals: [], strategicGoals: [strategic("Automate iron plate production", "Automate iron plate production")] };
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "punctuation-root", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(plan, blockedPlan()), workerGenerate: async () => completed() });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "Automate iron plate production." }); await supervisor.whenIdle();
+    const state = supervisor.snapshot(); const child = state.goals.find((value) => value.kind === "strategic"); expect(child?.parentId).toBe(state.rootGoalId); supervisor.dispose();
+  });
+
+  it("spawns generic companions only for non-autonomous brains", () => {
+    expect(shouldSpawnGenericCompanion("autonomous")).toBe(false); expect(shouldSpawnGenericCompanion("api")).toBe(true); expect(shouldSpawnGenericCompanion("codex")).toBe(true);
   });
 });
 

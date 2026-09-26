@@ -18,6 +18,7 @@ import { assertProtocolCompatibility } from "./protocol/contract.js";
 import { AutonomousSupervisor } from "./autonomous/supervisor.js";
 import { MemoryStore } from "./autonomous/memory.js";
 import { CoordinationBroker } from "./coordination/broker.js";
+import { shouldSpawnGenericCompanion } from "./autonomous/startup.js";
 
 const HELP = `agentic-factorio — an AI companion for your Factorio world
 
@@ -116,10 +117,12 @@ async function play(settings: Settings, fresh: boolean, brainKind: string, worke
   assertProtocolCompatibility(ping);
   log.info(`connected — Factorio ${ping.factorio_version}, mod v${ping.mod_version}, brain ${label}`);
 
-  const spawned = await bridge.call<SpawnResult>("spawn_companion", {});
-  log.info(
-    `${spawned.already_existed ? "companion found" : "companion spawned"} at (${spawned.position.x}, ${spawned.position.y})`,
-  );
+  if (shouldSpawnGenericCompanion(brainKind)) {
+    const spawned = await bridge.call<SpawnResult>("spawn_companion", {});
+    log.info(
+      `${spawned.already_existed ? "companion found" : "companion spawned"} at (${spawned.position.x}, ${spawned.position.y})`,
+    );
+  }
 
   let loop: {
     onChat(msg: import("./types.js").ChatMessage): void;

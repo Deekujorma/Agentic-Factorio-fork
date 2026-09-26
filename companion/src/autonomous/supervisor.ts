@@ -14,6 +14,7 @@ import { BridgeVerificationReader, verifyGoal, type VerificationReader } from ".
 import { defaultIntentClassifier, type IntentClassifier, type PlayerIntent } from "./intent.js";
 import { productionPlansForStrategy } from "./productionPlanner.js";
 import { defaultTacticalPlanner, tacticalPlanSchema, type TacticalPlanner } from "./tactical.js";
+import { resolveCoordinatorPlan, type ResolvedPlan } from "./planResolver.js";
 
 const plannedGoalSchema = z.object({
   title: z.string().min(1), description: z.string().min(1), priority: z.number().int().min(-100).max(100).default(0),
@@ -187,7 +188,6 @@ export class AutonomousSupervisor {
   }
 
   private async addTacticalInstruction(message: ChatMessage): Promise<void> {
-    if (!this.memory.rootGoalId) { await this.replaceObjective(message); return; }
     const controller = this.modelController();
     let plan;
     try { plan = tacticalPlanSchema.parse(await this.tacticalPlanner({ model: this.model, message: message.text, signal: controller.signal })); }
@@ -274,14 +274,26 @@ export class AutonomousSupervisor {
       world: { knownAreas: this.memory.knownAreas.slice(-8), productionLines: this.memory.productionLines.slice(-8), research: this.memory.research.slice(-8) },
       productionPlans, failures: this.memory.failedApproaches.slice(-8), crew: state ? { tick: state.tick, companion: state.companion, otherCompanions: state.other_companions, research: state.research, production: state.production_top } : null,
     });
-    const controller = this.modelController();
-    let plan: CoordinatorPlan;
-    try { plan = await this.coordinatorGenerate({ model: this.model, context, signal: controller.signal }); }
-    finally { this.releaseController(controller); }
+    let plan: CoordinatorPlan | undefined; let resolved: ResolvedPlan | undefined; let semanticError = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = this.modelController();
+      try {
+        plan = coordinatorPlanSchema.parse(await this.coordinatorGenerate({ model: this.model, context: attempt === 0 ? context : `${context}\nSEMANTIC_REPAIR_REQUIRED: ${semanticError}\nReturn a complete corrected plan.`, signal: controller.signal }));
+        resolved = resolveCoordinatorPlan(this.memory, plan); break;
+      } catch (error) {
+        semanticError = error instanceof Error ? error.message : String(error);
+        this.trajectory.append({ type: "coordinator_plan_rejected", data: { attempt: attempt + 1, error: semanticError } });
+      } finally { this.releaseController(controller); }
+    }
+    if (!plan || !resolved) {
+      this.memory.campaignStatus = "blocked"; this.memory.blockers = [`planner validation failed: ${semanticError}`];
+      this.checkpoint("planner_validation_failed", { error: semanticError });
+      await this.bridge.call("say", { text: "I couldn't safely construct the next plan, so I have not started any new work." }).catch(() => undefined);
+      return;
+    }
     this.memory.decisions.push(plan.decision);
     this.memory.nextStrategicActions = plan.goals.map((goal) => goal.title);
     this.trajectory.append({ type: "coordinator_decision", data: { decision: plan.decision, goals: plan.goals.map((goal) => goal.title) } });
-    if (plan.playerMessage) await this.bridge.call("say", { text: plan.playerMessage }).catch(() => undefined);
     if (plan.objectiveComplete) {
       const root = this.memory.rootGoalId ? this.graph.get(this.memory.rootGoalId) : undefined;
       if (!root) throw new Error("campaign has no persistent root goal");
@@ -304,39 +316,25 @@ export class AutonomousSupervisor {
       await this.bridge.call("say", { text: `I need help to continue: ${plan.blockedReason}` }).catch(() => undefined);
       this.checkpoint("blocked_on_player", { reason: plan.blockedReason }); return;
     }
-    const root = this.memory.rootGoalId ? this.graph.get(this.memory.rootGoalId) : undefined;
-    const ids = new Map<string, string>(this.memory.goals.map((goal) => [goal.title, goal.id]));
-    for (const strategic of plan.strategicGoals) {
-      const parentId = strategic.parentTitle ? ids.get(strategic.parentTitle) : root?.id;
-      if (!parentId) throw new Error(`strategic goal ${strategic.title} has unknown parent`);
-      const existing = this.memory.goals.find((goal) => goal.kind === "strategic" && goal.title === strategic.title && goal.parentId === parentId);
-      const goal = existing ?? this.graph.create({ kind: "strategic", parentId, title: strategic.title, description: strategic.description, priority: strategic.priority });
+    for (const item of resolved.strategic) {
+      const strategic = item.input as CoordinatorPlan["strategicGoals"][number];
+      const goal = item.existing ?? this.graph.create({ id: item.id, kind: "strategic", parentId: item.parentId, title: strategic.title, description: strategic.description, priority: strategic.priority });
       if (strategic.verification?.length) this.graph.update(goal.id, { verification: strategic.verification });
       if (goal.status === "pending") this.graph.recover(goal.id, "active");
-      ids.set(goal.title, goal.id);
     }
-    for (const planned of plan.goals) {
-      const parentId = planned.parentTitle ? ids.get(planned.parentTitle) : root?.id;
-      if (!parentId) throw new Error(`tactical goal ${planned.title} has unknown parent`);
-      const existing = this.memory.goals.find((goal) => goal.kind === "tactical" && goal.title === planned.title && goal.parentId === parentId && !["failed", "cancelled"].includes(goal.status));
-      if (existing) { ids.set(planned.title, existing.id); continue; }
+    for (const item of resolved.tactical) {
+      const planned = item.input as CoordinatorPlan["goals"][number];
+      if (item.existing) continue;
       const goal = this.graph.create({
-        kind: "tactical", parentId, title: planned.title, description: planned.description, priority: planned.priority,
+        id: item.id, kind: "tactical", parentId: item.parentId, title: planned.title, description: planned.description, priority: planned.priority,
         verification: planned.verification, job: { area: planned.area, expectedInputs: planned.expectedInputs, expectedOutput: planned.expectedOutput, definitionOfDone: planned.definitionOfDone },
       });
-      ids.set(planned.title, goal.id);
       this.trajectory.append({ type: "goal_created", goalId: goal.id, data: { title: goal.title } });
     }
-    for (const planned of plan.goals) {
-      const id = ids.get(planned.title)!;
-      for (const dependencyTitle of planned.dependsOnTitles) {
-        const dependency = ids.get(dependencyTitle) ?? this.memory.goals.find((goal) => goal.title === dependencyTitle)?.id;
-        if (!dependency) throw new Error(`coordinator referenced unknown dependency ${dependencyTitle}`);
-        this.graph.addDependency(id, dependency);
-      }
-    }
+    for (const item of resolved.tactical) for (const dependency of item.dependencyIds) this.graph.addDependency(item.id, dependency);
     this.graph.refreshReady();
     await this.completeProposedStrategicGoals(plan.completeStrategicGoals ?? []);
+    if (plan.playerMessage) await this.bridge.call("say", { text: plan.playerMessage }).catch(() => undefined);
   }
 
   private async dispatchReady(): Promise<void> {
@@ -435,6 +433,7 @@ export class AutonomousSupervisor {
       this.releaseController(controller);
       this.memory.activeJobs = this.memory.activeJobs.filter((active) => active.jobId !== job.id);
       await this.releaseWorker(workerId, companion, reservationId);
+      if (!this.memory.objective && this.memory.activeJobs.length === 0 && !this.memory.goals.some((candidate) => candidate.kind === "tactical" && ["ready", "active", "verifying"].includes(candidate.status))) this.memory.campaignStatus = "idle";
       this.checkpoint("worker_result", { status: goal.status }, undefined, goal.id, job.id, workerId);
       this.requestWake("worker_terminal");
       this.resolveIdle();

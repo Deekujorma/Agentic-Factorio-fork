@@ -96,7 +96,7 @@ const READ_ONLY_GAME_TOOLS = new Set([
 
 export async function runMcpServer(opts: McpServerOptions): Promise<void> {
   const server = new McpServer(
-    { name: "agentic-factorio", version: "0.5.0" },
+    { name: "agentic-factorio", version: "0.6.0" },
     {
       instructions: MCP_GAMEPLAY_INSTRUCTIONS,
     },
