@@ -101,9 +101,19 @@ function M.verify(params)
     elseif kind == "companion_near_player" then
       expected = math.max(1, tonumber(check.maximum_distance) or 5)
       actual = 1000000000
-      local player = check.player and game.get_player(check.player) or game.connected_players[1]
+      local player
+      if check.player ~= nil then
+        player = game.get_player(check.player)
+      else
+        player = game.connected_players[1]
+      end
       if player then
-        for _, record in pairs(storage.companions or {}) do
+        local records = storage.companions or {}
+        if check.companion ~= nil then
+          local record = records[check.companion]
+          records = record and { [check.companion] = record } or {}
+        end
+        for _, record in pairs(records) do
           local entity = record.entity
           if entity and entity.valid and entity.surface == player.surface then
             local dx, dy = entity.position.x - player.position.x, entity.position.y - player.position.y

@@ -29,9 +29,13 @@ local force = {
   },
 }
 package.loaded["scripts.companion"] = { get = function() return { force = force, surface = surface } end }
-local player = { name = "Player", position = { x = 0, y = 0 }, surface = surface }
-_G.game = { tick = 42, connected_players = { player }, forces = { player = force }, surfaces = { surface }, get_entity_by_unit_number = function() return chest end, get_player = function() return player end }
-_G.storage = { autonomous = { event_counts = { rocket_launched = 1 } }, companions = { Ada = { entity = { valid = true, position = { x = 3, y = 4 }, surface = surface } } } }
+local player_p = { name = "P", position = { x = 0, y = 0 }, surface = surface }
+local player_q = { name = "Q", position = { x = 200, y = 0 }, surface = surface }
+local players = { P = player_p, Q = player_q }
+local ada = { valid = true, position = { x = 100, y = 0 }, surface = surface }
+local babbage = { valid = true, position = { x = 2, y = 0 }, surface = surface }
+_G.game = { tick = 42, connected_players = { player_p, player_q }, forces = { player = force }, surfaces = { surface }, get_entity_by_unit_number = function() return chest end, get_player = function(name) return players[name] end }
+_G.storage = { autonomous = { event_counts = { rocket_launched = 1 } }, companions = { Ada = { entity = ada }, Babbage = { entity = babbage } } }
 
 local autonomous = require("scripts.autonomous")
 local verified = autonomous.verify({ checks = {
@@ -57,8 +61,25 @@ check(blocked.results[1].ok == false and blocked.results[1].actual == 1,
   "no_factory_blocker fails with one or more blockers")
 local launched = autonomous.verify({ checks = { { kind = "event_count", event = "rocket_launched", minimum = 1 } } })
 check(launched.results[1].ok == true, "event_count observes persisted rocket launches")
-local nearby = autonomous.verify({ checks = { { kind = "companion_near_player", maximum_distance = 5 } } })
-check(nearby.results[1].ok == true and nearby.results[1].actual == 5, "companion_near_player uses physical distance")
+local wrong_companion = autonomous.verify({ checks = { { kind = "companion_near_player", companion = "Ada", player = "P", maximum_distance = 5 } } })
+check(wrong_companion.results[1].ok == false and wrong_companion.results[1].actual == 100,
+  "companion_near_player does not substitute a nearby companion")
+ada.position = { x = 3, y = 0 }
+babbage.position = { x = 100, y = 0 }
+local assigned_nearby = autonomous.verify({ checks = { { kind = "companion_near_player", companion = "Ada", player = "P", maximum_distance = 5 } } })
+check(assigned_nearby.results[1].ok == true and assigned_nearby.results[1].actual == 3,
+  "companion_near_player passes for the assigned nearby companion")
+ada.position = { x = 100, y = 0 }
+player_q.position = { x = 101, y = 0 }
+local wrong_player = autonomous.verify({ checks = { { kind = "companion_near_player", companion = "Ada", player = "P", maximum_distance = 5 } } })
+check(wrong_player.results[1].ok == false and wrong_player.results[1].actual == 100,
+  "companion_near_player does not substitute another nearby player")
+local missing_identity = autonomous.verify({ checks = {
+  { kind = "companion_near_player", companion = "Missing", player = "P", maximum_distance = 5 },
+  { kind = "companion_near_player", companion = "Ada", player = "Missing", maximum_distance = 5 },
+} })
+check(missing_identity.results[1].ok == false and missing_identity.results[2].ok == false,
+  "companion_near_player fails cleanly for missing named identities")
 
 force.recipes.probability = { name = "probability", category = "chemistry", energy = 1, enabled = true,
   ingredients = {}, products = { { name = "rare", amount_min = 2, amount_max = 4, probability = 0.5, type = "item" } } }

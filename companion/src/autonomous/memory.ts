@@ -26,7 +26,7 @@ export const verificationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("operational"), entity: z.string(), minimum: z.number().int().positive().default(1), area: areaSchema }),
   z.object({ kind: z.literal("no_factory_blocker"), area: areaSchema, entity: z.string().optional() }),
   z.object({ kind: z.literal("event_count"), event: z.enum(["rocket_launched"]), minimum: z.number().int().positive(), afterTick: z.number().int().nonnegative().optional() }),
-  z.object({ kind: z.literal("companion_near_player"), player: z.string().optional(), maximumDistance: z.number().positive().max(32) }),
+  z.object({ kind: z.literal("companion_near_player"), companion: z.string().optional(), player: z.string().optional(), maximumDistance: z.number().positive().max(32) }),
   z.object({ kind: z.literal("manual"), description: z.string().min(1) }),
 ]);
 export type Verification = z.infer<typeof verificationSchema>;
@@ -52,7 +52,7 @@ export const goalSchema = z.object({
   result: z.string().optional(),
   nextReviewAt: z.string().datetime().optional(),
   job: z.object({
-    area: areaSchema.optional(), expectedInputs: z.array(z.string()), expectedOutput: z.string(), definitionOfDone: z.string(),
+    area: areaSchema.optional(), expectedInputs: z.array(z.string()), expectedOutput: z.string(), definitionOfDone: z.string(), requestedBy: z.string().optional(),
   }).optional(),
 });
 export type Goal = z.infer<typeof goalSchema>;

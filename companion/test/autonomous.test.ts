@@ -128,6 +128,26 @@ describe("player intent routing", () => {
     expect(supervisor.snapshot().objective).toBe(objective); expect(harness.calls.filter((call) => call.method === "cancel").length).toBe(cancelCount + 1); supervisor.dispose();
   });
 
+  it("binds a come-here check to the leased companion and requesting player", async () => {
+    const harness = fakeBridge(); let packetCheck: unknown; let rpcCheck: unknown;
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, {
+      key: "come-here-binding", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()),
+      workerGenerate: async ({ packet }) => { packetCheck = packet.verification[0]; return completed(); },
+      verificationReader: { verify: async (checks) => {
+        rpcCheck = checks[0];
+        return { tick: 12, results: [{ kind: "companion_near_player", ok: true, actual: 3, expected: 5 }] };
+      } },
+      intentClassifier: async ({ message }) => deterministicIntent(message, true)!,
+    });
+    await supervisor.start();
+    await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "launch a rocket" }); await supervisor.whenIdle();
+    await supervisor.handleChat({ id: 2, tick: 2, player: "P", text: "come here" }); await supervisor.whenIdle();
+    expect(packetCheck).toMatchObject({ kind: "companion_near_player", companion: "Ada", player: "P", maximumDistance: 5 });
+    expect(rpcCheck).toMatchObject({ kind: "companion_near_player", companion: "Ada", player: "P", maximum_distance: 5 });
+    expect(supervisor.snapshot().goals.find((value) => value.verification.some((check) => check.kind === "companion_near_player"))?.job?.requestedBy).toBe("P");
+    supervisor.dispose();
+  });
+
   it("never creates a physical tactical goal backed only by worker prose", async () => {
     const harness = fakeBridge(); const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, {
       key: "unsafe-tactical", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => completed(),

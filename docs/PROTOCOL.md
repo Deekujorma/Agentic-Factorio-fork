@@ -402,6 +402,9 @@ Input: `{ checks: VerificationCheck[] }` (1–32 checks). Supported checks are
 `no_factory_blocker`, `companion_near_player`, and `event_count` (currently
 `rocket_launched`). The blocker predicate succeeds only when the matching area contains
 zero machines in a known blocked state.
+`companion_near_player` accepts `companion` and `player` names. When either is
+provided, verification targets that exact identity and fails if it does not exist;
+only an omitted player uses the first-connected-player fallback.
 The method performs no mutation and returns
 `{ tick, results: [{ kind, ok, actual, expected }] }`. Event checks can include
 `after_tick` so completion is grounded after the campaign began. Areas are bounded to a

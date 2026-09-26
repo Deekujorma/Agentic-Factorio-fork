@@ -197,7 +197,7 @@ export class AutonomousSupervisor {
       return;
     } finally { this.releaseController(controller); }
     this.memory.paused = false; this.memory.campaignStatus = "running";
-    const goal = this.graph.create({ kind: "tactical", parentId: this.memory.rootGoalId, title: plan.title, description: plan.description, priority: 100, verification: plan.verification, job: { area: plan.area, expectedInputs: plan.expectedInputs, expectedOutput: plan.expectedOutput, definitionOfDone: plan.definitionOfDone } });
+    const goal = this.graph.create({ kind: "tactical", parentId: this.memory.rootGoalId, title: plan.title, description: plan.description, priority: 100, verification: plan.verification, job: { area: plan.area, expectedInputs: plan.expectedInputs, expectedOutput: plan.expectedOutput, definitionOfDone: plan.definitionOfDone, requestedBy: message.player } });
     if (!plan.physical) {
       this.graph.transition(goal.id, "active"); this.graph.transition(goal.id, "verifying"); this.graph.transition(goal.id, "done", "informational tactical request");
       await this.bridge.call("say", { text: plan.expectedOutput }).catch(() => undefined);
@@ -373,10 +373,13 @@ export class AutonomousSupervisor {
 
   private async executeWorker(workerId: string, companion: string, goal: Goal, job: CoordinationJob, reservationId?: string): Promise<void> {
     const worker = new AutonomousWorker(workerId, this.model, this.bridge, this.broker, this.workerGenerate);
+    const boundVerification = goal.verification.map((check) => check.kind === "companion_near_player"
+      ? { ...check, companion, player: check.player ?? goal.job?.requestedBy }
+      : check);
     const packet: WorkerPacket = {
       goalId: goal.id, objective: goal.description, companion, agentId: workerId, relevantArea: goal.job?.area,
       expectedInputs: goal.job?.expectedInputs ?? [], expectedOutput: goal.job?.expectedOutput ?? goal.title,
-      definitionOfDone: goal.job?.definitionOfDone ?? goal.title, verification: goal.verification,
+      definitionOfDone: goal.job?.definitionOfDone ?? goal.title, verification: boundVerification,
       priorFailures: this.memory.failedApproaches.filter((failure) => failure.startsWith(`${goal.title}:`)).slice(-2),
     };
     const controller = this.modelController();
@@ -409,7 +412,7 @@ export class AutonomousSupervisor {
       }
       await this.broker.finishJob(workerId, job.id, result.summary);
       this.graph.transition(goal.id, "verifying");
-      const verification = await verifyGoal(goal, this.verifier, this.memory.goals);
+      const verification = await verifyGoal({ ...goal, verification: boundVerification }, this.verifier, this.memory.goals);
       goal.evidence.push(...verification.evidence);
       this.trajectory.append({ type: "verification_result", tick: verification.tick, goalId: goal.id, jobId: job.id, data: { ok: verification.ok, evidence: verification.evidence } });
       if (verification.ok) {
