@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { NoObjectGeneratedError } from "ai";
 import type { Bridge } from "../src/bridge.js";
 import { CoordinationBroker } from "../src/coordination/broker.js";
 import { GoalGraph } from "../src/autonomous/goals.js";
@@ -231,6 +232,27 @@ describe("coordinator semantic plan resolution", () => {
     expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("Kicking off"))).toBe(false);
     expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("not started any new work"))).toBe(true);
     supervisor.dispose();
+  });
+
+  it("records structured-output diagnostics and supplies them to the single repair attempt", async () => {
+    const harness = fakeBridge(); const memoryRoot = root(); const contexts: string[] = []; let calls = 0;
+    const generated = '{"decision":"start","goals":"not-an-array","playerMessage":"Starting now"}';
+    const noObject = new NoObjectGeneratedError({
+      message: "No object generated: response did not match schema",
+      cause: new Error("goals: expected array, received string"), text: generated,
+      finishReason: "stop", response: { id: "test-response", timestamp: new Date(), modelId: "test-model" },
+      usage: { inputTokens: 100, outputTokens: 25, totalTokens: 125 } as never,
+    });
+    const invalidRepair: CoordinatorPlan = { decision: "start", objectiveComplete: false, campaignVerification: [], completeStrategicGoals: [], goals: [], strategicGoals: [{ title: "Smelting", description: "Smelt", priority: 1, verification: [], parentTitle: "Missing" }], playerMessage: "Starting now" };
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "no-object-diagnostics", workers: 1, memoryRoot, brokerRoot: root(), coordinatorGenerate: async ({ context }) => { contexts.push(context); if (calls++ === 0) throw noObject; return invalidRepair; }, workerGenerate: async () => completed() });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "Automate iron." }); await supervisor.whenIdle();
+    expect(calls).toBe(2); expect(contexts[1]).toContain("goals: expected array, received string"); expect(contexts[1]).toContain(generated); expect(contexts[1]).toContain("conforms exactly to the required coordinator schema");
+    const events = fs.readFileSync(new TrajectoryLog("no-object-diagnostics", memoryRoot).file, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { type: string; data?: Record<string, unknown> });
+    const rejection = events.find((event) => event.type === "coordinator_plan_rejected" && event.data?.attempt === 1);
+    expect(rejection?.data).toMatchObject({ finishReason: "stop", text: generated, cause: "Error: goals: expected array, received string" });
+    expect(rejection?.data?.usage).toMatchObject({ inputTokens: 100, outputTokens: 25 });
+    expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("Starting now"))).toBe(false);
+    expect(supervisor.snapshot().campaignStatus).toBe("blocked"); supervisor.dispose();
   });
 
   it("accepts the observed punctuation-mismatched root parent", async () => {

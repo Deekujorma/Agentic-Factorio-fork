@@ -1,4 +1,4 @@
-import { generateText, Output, type LanguageModel } from "ai";
+import { generateText, NoObjectGeneratedError, Output, type LanguageModel } from "ai";
 import { z } from "zod";
 import type { Bridge } from "../bridge.js";
 import { CoordinationBroker, type CoordinationEvent, type CoordinationJob } from "../coordination/broker.js";
@@ -35,6 +35,19 @@ const coordinatorPlanSchema = z.object({
 }).refine((plan) => new Set(plan.goals.map((goal) => goal.title)).size === plan.goals.length, "goal titles must be unique within a wave");
 export type CoordinatorPlan = z.infer<typeof coordinatorPlanSchema>;
 export type CoordinatorGenerate = (input: { model: LanguageModel; context: string; signal: AbortSignal }) => Promise<CoordinatorPlan>;
+
+const DIAGNOSTIC_LIMIT = 12 * 1024;
+function diagnosticText(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = value instanceof Error
+    ? `${value.name}: ${value.message}${value.cause ? `; cause: ${diagnosticText(value.cause) ?? String(value.cause)}` : ""}`
+    : typeof value === "string" ? value : (() => { try { return JSON.stringify(value); } catch { return String(value); } })();
+  return text.slice(0, DIAGNOSTIC_LIMIT);
+}
+function safeDiagnosticValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  try { return JSON.parse(JSON.stringify(value)); } catch { return diagnosticText(value); }
+}
 
 export const defaultCoordinatorGenerate: CoordinatorGenerate = async ({ model, context, signal }) => {
   const result = await generateText({
@@ -274,15 +287,24 @@ export class AutonomousSupervisor {
       world: { knownAreas: this.memory.knownAreas.slice(-8), productionLines: this.memory.productionLines.slice(-8), research: this.memory.research.slice(-8) },
       productionPlans, failures: this.memory.failedApproaches.slice(-8), crew: state ? { tick: state.tick, companion: state.companion, otherCompanions: state.other_companions, research: state.research, production: state.production_top } : null,
     });
-    let plan: CoordinatorPlan | undefined; let resolved: ResolvedPlan | undefined; let semanticError = "";
+    let plan: CoordinatorPlan | undefined; let resolved: ResolvedPlan | undefined; let semanticError = ""; let repairFeedback = "";
     for (let attempt = 0; attempt < 2; attempt++) {
       const controller = this.modelController();
       try {
-        plan = coordinatorPlanSchema.parse(await this.coordinatorGenerate({ model: this.model, context: attempt === 0 ? context : `${context}\nSEMANTIC_REPAIR_REQUIRED: ${semanticError}\nReturn a complete corrected plan.`, signal: controller.signal }));
+        plan = coordinatorPlanSchema.parse(await this.coordinatorGenerate({ model: this.model, context: attempt === 0 ? context : `${context}\nCOORDINATOR_PLAN_REPAIR_REQUIRED:\n${repairFeedback}\nCorrect the failed object so it conforms exactly to the required coordinator schema. Return one complete corrected object only.`, signal: controller.signal }));
         resolved = resolveCoordinatorPlan(this.memory, plan); break;
       } catch (error) {
         semanticError = error instanceof Error ? error.message : String(error);
-        this.trajectory.append({ type: "coordinator_plan_rejected", data: { attempt: attempt + 1, error: semanticError } });
+        if (NoObjectGeneratedError.isInstance(error)) {
+          const cause = diagnosticText(error.cause); const text = diagnosticText(error.text);
+          const diagnostics = { message: error.message, finishReason: error.finishReason, cause, text, usage: safeDiagnosticValue(error.usage) };
+          this.trajectory.append({ type: "coordinator_plan_rejected", data: { attempt: attempt + 1, error: semanticError, ...diagnostics } });
+          log.error(`coordinator structured output rejected (finish=${error.finishReason ?? "unknown"}; cause=${cause ?? "unknown"}; text=${text ?? "<empty>"})`);
+          repairFeedback = `Validation/parsing cause: ${cause ?? error.message}\nFinish reason: ${error.finishReason ?? "unknown"}${text ? `\nFailed generated object text:\n${text}` : ""}`;
+        } else {
+          this.trajectory.append({ type: "coordinator_plan_rejected", data: { attempt: attempt + 1, error: semanticError } });
+          repairFeedback = `Semantic/schema validation error: ${semanticError}`;
+        }
       } finally { this.releaseController(controller); }
     }
     if (!plan || !resolved) {
