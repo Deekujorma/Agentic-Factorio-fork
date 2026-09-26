@@ -418,8 +418,8 @@ end
 
 -- -------------------------------------------------------- describe_prototype
 
-local function describe_entity(ent, item_name)
-  local out = { kind = "entity", entity = ent.name }
+local function describe_entity(ent, item_name, force)
+  local out = { kind = "entity", entity = ent.name, entity_type = ent.type }
 
   if not item_name then
     -- Which item places this entity (nice to know when the caller asked by
@@ -430,6 +430,9 @@ local function describe_entity(ent, item_name)
     end
   end
   if item_name then out.placed_by_item = item_name end
+  if item_name and force and force.recipes[item_name] then
+    out.recipe_enabled = force.recipes[item_name].enabled == true
+  end
 
   local ok, v
 
@@ -536,9 +539,9 @@ function M.describe_prototype(params)
       local item = prototypes.item[name]
       local placed = item and item.place_result
       if placed then
-        out[name] = describe_entity(placed, name)
+        out[name] = describe_entity(placed, name, force)
       elseif prototypes.entity[name] then
-        out[name] = describe_entity(prototypes.entity[name], nil)
+        out[name] = describe_entity(prototypes.entity[name], nil, force)
       elseif prototypes.recipe[name] then
         out[name] = describe_recipe(prototypes.recipe[name], force)
       else

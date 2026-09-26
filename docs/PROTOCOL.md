@@ -1,9 +1,9 @@
-# Mod ↔ Companion protocol (v3 — executable contract)
+# Mod ↔ Companion protocol (v5 — executable contract)
 
 The runtime method manifest and envelope validator live in
 `companion/src/protocol/contract.ts`. A conformance test verifies that every
 method registered by the Lua mod appears in that manifest. `ping` returns
-`protocol_version: 4`; incompatible clients must fail with an actionable error.
+`protocol_version: 5`; incompatible clients must fail with an actionable error.
 
 This file is the **single source of truth** for the JSON contract between the Factorio mod
 (`mod/agentic-companion`) and the companion app (`companion/`). Both sides must conform to it.
@@ -247,7 +247,7 @@ Resource letters uppercase, building letters lowercase, assigned dynamically and
 per name (item, entity or recipe — resolve in that order, follow item→place_result):
 ```jsonc
 { "burner-mining-drill": {
-    "kind":"entity", "entity":"burner-mining-drill", "placed_by_item":"burner-mining-drill",
+    "kind":"entity", "entity":"burner-mining-drill", "entity_type":"mining-drill", "placed_by_item":"burner-mining-drill", "recipe_enabled":true,
     "tile_width":2, "tile_height":2,
     "drop_offset":{"x":-0.5,"y":-1.5},       // vector_to_place_result at direction 0 (north); rotate with the entity
     "energy":"burner", "fuel_categories":["chemical"],
@@ -392,3 +392,29 @@ same time.
 - The mod never blocks; long actions are tasks; the companion polls `get_task` (500 ms).
 - The mod only ever mines resources/trees/rocks (enforced by type filter) — player
   structures can be *operated* (insert/extract/rotate/set_recipe) but never destroyed.
+
+## v5 — autonomous read-only observations
+
+### `verify_autonomous`
+
+Input: `{ checks: VerificationCheck[] }` (1–32 checks). Supported checks are
+`entity_count`, `resource_count`, `inventory`, `research`, `production`, `operational`, and
+`no_factory_blocker`, `companion_near_player`, and `event_count` (currently
+`rocket_launched`). The blocker predicate succeeds only when the matching area contains
+zero machines in a known blocked state.
+`entity_count` is restricted to player-force entities. `resource_count` counts only
+the named neutral resource prototype (`type = "resource"`) and never applies a force filter.
+`companion_near_player` accepts `companion` and `player` names. When either is
+provided, verification targets that exact identity and fails if it does not exist;
+only an omitted player uses the first-connected-player fallback.
+The method performs no mutation and returns
+`{ tick, results: [{ kind, ok, actual, expected }] }`. Event checks can include
+`after_tick` so completion is grounded after the campaign began. Areas are bounded to a
+256-tile radius. Inventory targets may use a unit number or map position.
+
+### `get_recipe_graph`
+
+Input: `{ item, include_all? }`. Returns the running force's actual normalized
+recipes (`name`, category, energy, enabled state, typed ingredients and typed
+products). It is read-only. The companion's deterministic `plan_production`
+tool consumes this data; no arbitrary Lua is accepted or evaluated.

@@ -91,12 +91,12 @@ function formatChatLines(messages: ChatMessage[]): string {
 const READ_ONLY_GAME_TOOLS = new Set([
   "look_around", "view_area", "check_inventory", "inspect_entity", "scan_area",
   "describe_prototype", "analyze_factory", "can_place", "find_buildable_area",
-  "list_blueprints", "read_blueprint", "list_trains",
+  "list_blueprints", "read_blueprint", "list_trains", "plan_production",
 ]);
 
 export async function runMcpServer(opts: McpServerOptions): Promise<void> {
   const server = new McpServer(
-    { name: "agentic-factorio", version: "0.5.0" },
+    { name: "agentic-factorio", version: "0.6.0" },
     {
       instructions: MCP_GAMEPLAY_INSTRUCTIONS,
     },

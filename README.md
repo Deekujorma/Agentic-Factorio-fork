@@ -20,6 +20,58 @@ the game and the model. The mod does the in-game work (perception, multi-tick ta
 companion exposes tools to the LLM — either through its built-in agent loop or as an MCP
 server for Claude Code / Codex.
 
+### Autonomous Ollama campaigns
+
+Run one persistent strategic coordinator and bounded tactical worker contexts
+against the same already-running Ollama endpoint:
+
+```sh
+npx agentic-factorio play --brain autonomous --provider ollama --model qwen3 --workers 3
+```
+
+The application creates no Ollama process and changes no Ollama service or
+global setting. The coordinator and workers reuse the same provider/model
+handle, but every worker invocation is an independent short tactical context.
+The default is **3 workers**, configurable from 1–4. LLM workers are model
+contexts; Factorio companions are distinct physical bodies protected by broker
+leases and spatial reservations.
+
+Campaign memory, the versioned goal graph, checkpoints, and the concise JSONL
+trajectory are stored under `~/.config/agentic-factorio/autonomous/`. Broker
+jobs, leases, and reservations are under
+`~/.config/agentic-factorio/coordination/`. Both are keyed by RCON host and
+port. Restart the same command to resume. Use `--fresh` to atomically start that
+host/port campaign over, or inspect/reset it without an LLM:
+
+```sh
+npx agentic-factorio autonomous-status
+npx agentic-factorio autonomous-reset --confirm
+```
+
+`!stop` aborts active model requests, cancels Factorio tasks, recovers leases,
+persists a stopped checkpoint, and will not resume until a new player
+instruction arrives. Worker output is only evidence: typed read-only game
+checks decide whether strategic goals complete. The deterministic
+`plan_production` tool reads actual recipes from the running force and handles
+recursive intermediates, fluids, alternate/locked recipes, and cycles; it does
+not design belt topology or optimize layouts.
+
+Normal chat is intent-routed rather than treated as a replacement objective:
+status questions only report progress, small commands become tactical child
+jobs, requests such as “stop working on oil” cancel the matching strategic
+subtree, explicit “forget … instead” messages replace the campaign, and
+“continue” resumes a stopped or blocked campaign. Classification failures
+leave the campaign untouched. Every campaign has a persistent root goal with
+strategic children and tactical leaves. A coordinator completion proposal is
+accepted only after the root's non-manual, read-only game verification passes.
+
+Autonomous action tools are foreground-only. Persistent duties and player chat
+tools, including the asynchronous generic `run_plan`, are hidden from workers;
+construction calls are constrained to the
+worker's broker reservation. Worker heartbeats renew claims, companion leases,
+and reservations, and termination cancels that companion's outstanding tasks
+before releasing ownership.
+
 ## Quickstart
 
 Requirements: Factorio 2.x, Node ≥ 22, and a dedicated save (script commands disable

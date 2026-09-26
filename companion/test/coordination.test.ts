@@ -76,6 +76,21 @@ describe("CoordinationBroker", () => {
     expect((await broker.claimJob(worker.id))?.title).toBe("Second");
   });
 
+  it("recovers stale process claims, leases, and reservations on restart", async () => {
+    const [broker] = brokers();
+    const coordinator = await broker.registerAgent({ name: "Lead", role: "coordinator" });
+    const worker = await broker.registerAgent({ name: "Worker", role: "worker" });
+    await broker.submitJobs(coordinator.id, [{ title: "Recover", instructions: "work" }]);
+    await broker.claimJob(worker.id);
+    await broker.leaseCompanion(worker.id, "Anna");
+    await broker.reserveArea({ agentId: worker.id, label: "site", center: { x: 0, y: 0 }, radius: 4 });
+    await expect(broker.recoverAgents([worker.id])).resolves.toBe(1);
+    const snapshot = await broker.snapshot();
+    expect(snapshot.jobs[0]?.status).toBe("queued");
+    expect(snapshot.leases).toEqual([]);
+    expect(snapshot.reservations).toEqual([]);
+  });
+
   it("enforces exclusive companion leases and area reservations", async () => {
     const [a, b] = brokers();
     const workerA = await a.registerAgent({ name: "A", role: "worker" });

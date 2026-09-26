@@ -1,4 +1,4 @@
-// TypeScript mirror of docs/PROTOCOL.md (through v4). Keep in sync with the mod.
+// TypeScript mirror of docs/PROTOCOL.md (through v5). Keep in sync with the mod.
 
 export interface Position {
   x: number;
@@ -174,6 +174,8 @@ export interface PrototypeInfo {
   kind: "entity" | "recipe" | "unknown";
   // -- entity fields --
   entity?: string;
+  entity_type?: string;
+  recipe_enabled?: boolean;
   placed_by_item?: string;
   tile_width?: number;
   tile_height?: number;

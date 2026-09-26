@@ -13,10 +13,11 @@ local equipment = require("scripts.equipment")
 local spatial = require("scripts.spatial")
 local blueprint = require("scripts.blueprint")
 local screenshot = require("scripts.screenshot")
+local autonomous = require("scripts.autonomous")
 
 rpc.register("ping", function()
   return {
-    protocol_version = 4,
+    protocol_version = 5,
     mod_version = script.active_mods["agentic-companion"],
     factorio_version = script.active_mods["base"],
     tick = game.tick,
@@ -41,6 +42,8 @@ rpc.register("import_blueprint", blueprint.import)
 rpc.register("list_blueprints", blueprint.list)
 rpc.register("read_blueprint", blueprint.read)
 rpc.register("take_screenshot", screenshot.take)
+rpc.register("verify_autonomous", autonomous.verify)
+rpc.register("get_recipe_graph", autonomous.recipe_graph)
 rpc.register("exit_vehicle", drive.exit)
 local trains = require("scripts.trains")
 rpc.register("list_trains", trains.list_trains)
@@ -82,3 +85,4 @@ script.on_event(defines.events.on_entity_damaged, events.on_entity_damaged,
 script.on_event(defines.events.on_entity_died, events.on_entity_died,
   { { filter = "type", type = "character" } })
 script.on_event(defines.events.on_research_finished, events.on_research_finished)
+script.on_event(defines.events.on_rocket_launched, events.on_rocket_launched)

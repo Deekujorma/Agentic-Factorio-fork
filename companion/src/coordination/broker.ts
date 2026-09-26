@@ -54,6 +54,7 @@ export interface CoordinationEvent {
   id: number;
   kind: "job_done" | "job_failed" | "job_requeued" | "job_expired";
   jobId: string;
+  key?: string;
   title: string;
   agentId?: string;
   text: string;
@@ -320,6 +321,43 @@ export class CoordinationBroker {
     });
   }
 
+  async renewArea(agentId: string, reservationId: string, ttlSeconds = 300): Promise<AreaReservation> {
+    return this.mutate((state) => {
+      this.touchAgent(state, agentId);
+      const reservation = state.reservations[reservationId];
+      if (!reservation || reservation.agentId !== agentId) throw new Error("worker has no matching active area reservation");
+      reservation.expiresAt = Date.now() + ttlSeconds * 1000;
+      return reservation;
+    });
+  }
+
+  async assertWithinReservation(agentId: string, targets: Array<{ x: number; y: number; radius?: number }>): Promise<void> {
+    await this.mutate((state) => {
+      this.touchAgent(state, agentId);
+      const reservations = Object.values(state.reservations).filter((value) => value.agentId === agentId);
+      if (reservations.length === 0) throw new Error("spatial mutation requires an active area reservation");
+      for (const target of targets) {
+        const contained = reservations.some((reservation) =>
+          Math.hypot(target.x - reservation.center.x, target.y - reservation.center.y) + (target.radius ?? 0) <= reservation.radius
+        );
+        if (!contained) throw new Error(`target (${target.x}, ${target.y}) is outside the worker's active reservation`);
+      }
+    });
+  }
+
+  async assertWithinActiveReservation(agentId: string, targets: Array<{ x: number; y: number; radius?: number }>): Promise<void> {
+    await this.mutate((state) => {
+      this.touchAgent(state, agentId);
+      const reservations = Object.values(state.reservations).filter((value) => value.agentId === agentId);
+      if (reservations.length === 0) return;
+      for (const target of targets) {
+        if (!reservations.some((reservation) => Math.hypot(target.x - reservation.center.x, target.y - reservation.center.y) + (target.radius ?? 0) <= reservation.radius)) {
+          throw new Error(`target (${target.x}, ${target.y}) is outside the worker's active reservation`);
+        }
+      }
+    });
+  }
+
   async releaseArea(agentId: string, reservationId: string): Promise<void> {
     await this.mutate((state) => {
       const reservation = state.reservations[reservationId];
@@ -382,6 +420,38 @@ export class CoordinationBroker {
 
   async reset(): Promise<void> {
     await this.mutate((state) => Object.assign(state, emptyState()));
+  }
+
+  /** Process-restart recovery: return this supervisor's abandoned claims and
+   * leases to the queue immediately instead of waiting for their TTL. */
+  async recoverAgents(agentIds: string[]): Promise<number> {
+    return this.mutate((state) => {
+      const ids = new Set(agentIds);
+      let recovered = 0;
+      for (const job of Object.values(state.jobs)) {
+        if (job.status === "claimed" && job.assignedAgent && ids.has(job.assignedAgent)) {
+          const previous = job.assignedAgent;
+          job.status = "queued"; job.assignedAgent = undefined; job.claimExpiresAt = undefined;
+          job.error = "supervisor restarted; claim recovered"; job.updatedAt = Date.now(); recovered++;
+          this.pushEvent(state, { kind: "job_requeued", job, agentId: previous, text: job.error });
+        }
+      }
+      for (const [name, lease] of Object.entries(state.leases)) if (ids.has(lease.agentId)) delete state.leases[name];
+      for (const [id, reservation] of Object.entries(state.reservations)) if (ids.has(reservation.agentId)) delete state.reservations[id];
+      return recovered;
+    });
+  }
+
+  async abandonJobs(jobIds: string[], reason: string): Promise<number> {
+    return this.mutate((state) => {
+      const ids = new Set(jobIds); let abandoned = 0;
+      for (const job of Object.values(state.jobs)) if (ids.has(job.id) && (job.status === "queued" || job.status === "claimed")) {
+        const previous = job.assignedAgent; job.status = "failed"; job.error = reason;
+        job.assignedAgent = previous; job.claimExpiresAt = undefined; job.updatedAt = Date.now(); abandoned++;
+        this.pushEvent(state, { kind: "job_failed", job, agentId: previous, text: reason });
+      }
+      return abandoned;
+    });
   }
 
   private async setJobTerminal(agentId: string, jobId: string, status: "done" | "failed", text: string) {
@@ -463,6 +533,7 @@ export class CoordinationBroker {
       id: state.nextCoordinationEventId++,
       kind: input.kind,
       jobId: input.job.id,
+      key: input.job.key,
       title: input.job.title,
       agentId: input.agentId,
       text: input.text,

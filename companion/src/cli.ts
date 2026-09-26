@@ -15,6 +15,10 @@ import { runWizard } from "./setup/wizard.js";
 import { buildTools } from "./tools/adapter.js";
 import type { PingResult, SpawnResult } from "./types.js";
 import { assertProtocolCompatibility } from "./protocol/contract.js";
+import { AutonomousSupervisor } from "./autonomous/supervisor.js";
+import { MemoryStore } from "./autonomous/memory.js";
+import { CoordinationBroker } from "./coordination/broker.js";
+import { shouldSpawnGenericCompanion } from "./autonomous/startup.js";
 
 const HELP = `agentic-factorio — an AI companion for your Factorio world
 
@@ -23,19 +27,24 @@ Usage:
   agentic-factorio play [options]     connect to your hosted game and start the companion
   agentic-factorio mcp [options]      run as an MCP server (for Claude Code / Codex subscriptions)
   agentic-factorio doctor [options]   check every link in the chain and say what to fix
+  agentic-factorio autonomous-status show persisted campaign state without invoking an LLM
+  agentic-factorio autonomous-reset --confirm  permanently clear persisted campaign state
 
 Options:
   --rcon-host <host>       RCON host (default 127.0.0.1, env AGENTIC_RCON_HOST)
   --rcon-port <port>       RCON port (default 27015, env AGENTIC_RCON_PORT)
   --rcon-password <pw>     RCON password (env AGENTIC_RCON_PASSWORD)
-  --brain <kind>           api (default) | codex — "codex" drives the companion through
+  --brain <kind>           api (default) | codex | autonomous — autonomous uses one
+                           coordinator and bounded local worker contexts
                            \`codex exec\` with your ChatGPT subscription: no API key, no
                            polling — the app listens to chat and wakes Codex per message
   --provider <name>        openrouter | anthropic | openai | ollama (default: auto from keys)
   --model <id>             model id for your provider (default: Claude Sonnet)
   --proactive <min>        check in on the factory every N minutes, speak only when needed
   --fresh                  start with a blank memory (ignore the saved session)
+  --workers <count>        autonomous worker contexts (default 3, range 1-4)
   --json                   doctor: emit a redacted machine-readable report
+  --confirm                required by autonomous-reset
 
 Provider keys: OPENROUTER_API_KEY (recommended), ANTHROPIC_API_KEY or OPENAI_API_KEY.
 No key? Use your Claude Code / Codex subscription: run \`agentic-factorio setup\` and
@@ -44,7 +53,7 @@ pick the subscription option. \`agentic-factorio setup\` walks you through every
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function play(settings: Settings, fresh: boolean, brainKind: string): Promise<void> {
+async function play(settings: Settings, fresh: boolean, brainKind: string, workers = 3): Promise<void> {
   // Fail fast on a missing brain before waiting for the game.
   // "codex" spawns `codex exec` per chat message (ChatGPT subscription, no key).
   let apiModel: { model: unknown; label: string } | null = null;
@@ -108,10 +117,12 @@ async function play(settings: Settings, fresh: boolean, brainKind: string): Prom
   assertProtocolCompatibility(ping);
   log.info(`connected — Factorio ${ping.factorio_version}, mod v${ping.mod_version}, brain ${label}`);
 
-  const spawned = await bridge.call<SpawnResult>("spawn_companion", {});
-  log.info(
-    `${spawned.already_existed ? "companion found" : "companion spawned"} at (${spawned.position.x}, ${spawned.position.y})`,
-  );
+  if (shouldSpawnGenericCompanion(brainKind)) {
+    const spawned = await bridge.call<SpawnResult>("spawn_companion", {});
+    log.info(
+      `${spawned.already_existed ? "companion found" : "companion spawned"} at (${spawned.position.x}, ${spawned.position.y})`,
+    );
+  }
 
   let loop: {
     onChat(msg: import("./types.js").ChatMessage): void;
@@ -123,6 +134,15 @@ async function play(settings: Settings, fresh: boolean, brainKind: string): Prom
       model: settings.model,
       sessionKey: fresh ? undefined : `${settings.rcon.host}-${settings.rcon.port}`,
     });
+  } else if (brainKind === "autonomous") {
+    const key = sessionKey(settings.rcon.host, settings.rcon.port);
+    if (fresh) {
+      new MemoryStore(key).reset();
+      await new CoordinationBroker(key).reset();
+    }
+    const supervisor = new AutonomousSupervisor(bridge, apiModel!.model as never, { key, workers });
+    await supervisor.start();
+    loop = supervisor;
   } else {
     const tools = buildTools(bridge, { onTool: (name, detail) => log.tool(name, detail) });
     const agentLoop = new AgentLoop(bridge, apiModel!.model as never, tools, {
@@ -182,6 +202,8 @@ async function main(): Promise<void> {
       fresh: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       json: { type: "boolean" },
+      workers: { type: "string" },
+      confirm: { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -208,11 +230,13 @@ async function main(): Promise<void> {
     case "play": {
       const settings = resolveSettings(flags);
       const brainKind = values.brain ?? (settings.brainKind === "codex" ? "codex" : "api");
-      if (brainKind !== "api" && brainKind !== "codex") {
-        log.error(`unknown --brain '${brainKind}' — use "api" (default) or "codex"`);
+      if (brainKind !== "api" && brainKind !== "codex" && brainKind !== "autonomous") {
+        log.error(`unknown --brain '${brainKind}' — use "api" (default), "codex", or "autonomous"`);
         process.exit(1);
       }
-      await play(settings, values.fresh ?? false, brainKind);
+      const workers = values.workers === undefined ? 3 : Number(values.workers);
+      if (!Number.isInteger(workers) || workers < 1 || workers > 4) throw new Error("--workers must be an integer from 1 to 4");
+      await play(settings, values.fresh ?? false, brainKind, workers);
       return;
     }
     case "mcp": {
@@ -234,6 +258,28 @@ async function main(): Promise<void> {
     case "doctor":
       await runDoctor(resolveSettings(flags), { json: values.json ?? false });
       return;
+    case "autonomous-status": {
+      const settings = resolveSettings(flags);
+      const key = sessionKey(settings.rcon.host, settings.rcon.port);
+      const memory = new MemoryStore(key).load();
+      const broker = await new CoordinationBroker(key).snapshot();
+      console.log(JSON.stringify({
+        objective: memory.objective, status: memory.campaignStatus, paused: memory.paused,
+        goals: Object.fromEntries(["pending", "ready", "active", "verifying", "blocked", "done", "failed", "cancelled"].map((status) => [status, memory.goals.filter((goal) => goal.status === status).length])),
+        blockers: memory.blockers, activeJobs: memory.activeJobs, agents: broker.agents,
+        leases: broker.leases, reservations: broker.reservations, lastCheckpoint: memory.timestamps.lastCheckpointAt,
+      }, null, 2));
+      return;
+    }
+    case "autonomous-reset": {
+      if (!values.confirm) throw new Error("autonomous-reset is destructive; repeat with --confirm");
+      const settings = resolveSettings(flags);
+      const key = sessionKey(settings.rcon.host, settings.rcon.port);
+      new MemoryStore(key).reset();
+      await new CoordinationBroker(key).reset();
+      console.log(`Reset autonomous state for ${key}.`);
+      return;
+    }
     default:
       console.log(HELP);
       process.exit(1);

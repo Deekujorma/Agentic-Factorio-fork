@@ -52,5 +52,12 @@ build_plan.start({ auto_craft = false, steps = {
 } })
 check(next(crafted) == nil, "build_plan: auto-crafting can be disabled")
 
+local partial = build_plan._result_for_test({
+  steps = { {}, {}, {} }, _placed = 2, _auto_crafted = 0,
+  _failures = { { index = 2, why = "blocked" } },
+})
+check(partial.status == "failed" and partial.detail:find("requested 3, placed 2, failed 1", 1, true),
+  "build_plan: partial placement is a failure with structured counts")
+
 print(failures == 0 and "\nALL TESTS PASSED" or ("\n" .. failures .. " FAILURES"))
 os.exit(failures == 0 and 0 or 1)
