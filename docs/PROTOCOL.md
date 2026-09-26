@@ -247,7 +247,7 @@ Resource letters uppercase, building letters lowercase, assigned dynamically and
 per name (item, entity or recipe — resolve in that order, follow item→place_result):
 ```jsonc
 { "burner-mining-drill": {
-    "kind":"entity", "entity":"burner-mining-drill", "entity_type":"mining-drill", "placed_by_item":"burner-mining-drill",
+    "kind":"entity", "entity":"burner-mining-drill", "entity_type":"mining-drill", "placed_by_item":"burner-mining-drill", "recipe_enabled":true,
     "tile_width":2, "tile_height":2,
     "drop_offset":{"x":-0.5,"y":-1.5},       // vector_to_place_result at direction 0 (north); rotate with the entity
     "energy":"burner", "fuel_categories":["chemical"],

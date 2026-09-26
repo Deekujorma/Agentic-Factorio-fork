@@ -5,7 +5,7 @@ import { CoordinationBroker, type CoordinationEvent, type CoordinationJob } from
 import { log } from "../log.js";
 import type { ChatMessage, DescribePrototypesResult, GetStateResult } from "../types.js";
 import { GoalGraph } from "./goals.js";
-import { autonomousMemorySchema, MemoryStore, verificationSchema, type AutonomousMemory, type Goal } from "./memory.js";
+import { autonomousMemorySchema, MemoryStore, verificationSchema, type AutonomousMemory, type Goal, type Verification } from "./memory.js";
 import { AUTONOMOUS_COORDINATOR_PROMPT } from "./prompts.js";
 import { WorkerScheduler } from "./scheduler.js";
 import { TrajectoryLog } from "./trajectory.js";
@@ -24,8 +24,6 @@ const plannedGoalSchema = z.object({
   verification: z.array(verificationSchema).min(1),
   parentTitle: z.string().optional(),
   independentlyExecutable: z.boolean().optional(),
-}).superRefine((goal, context) => {
-  if (/\b(build|construct|place|deconstruct|blueprint)\b/i.test(goal.description) && !goal.area) context.addIssue({ code: "custom", message: "construction tactical goals require an area", path: ["area"] });
 });
 const strategicGoalSchema = z.object({ title: z.string().min(1), description: z.string().min(1), parentTitle: z.string().optional(), priority: z.number().int().min(-100).max(100).default(0), verification: z.array(verificationSchema).default([]) });
 const coordinatorPlanSchema = z.object({
@@ -48,6 +46,15 @@ function diagnosticText(value: unknown): string | undefined {
 function safeDiagnosticValue(value: unknown): unknown {
   if (value === undefined) return undefined;
   try { return JSON.parse(JSON.stringify(value)); } catch { return diagnosticText(value); }
+}
+function spatialVerificationArea(check: Verification): { x: number; y: number; radius: number } | undefined {
+  switch (check.kind) {
+    case "entity_count": case "resource_count": case "operational": case "no_factory_blocker": return check.area;
+    default: return undefined;
+  }
+}
+function isConstructionGoal(goal: Pick<CoordinatorPlan["goals"][number], "title" | "description">): boolean {
+  return /\b(build|construct|place|deconstruct|blueprint)\b/i.test(`${goal.title} ${goal.description}`);
 }
 
 export const defaultCoordinatorGenerate: CoordinatorGenerate = async ({ model, context, signal }) => {
@@ -289,18 +296,20 @@ export class AutonomousSupervisor {
     if (!this.memory.objective) return;
     const state = this.latestState;
     const productionPlans = await productionPlansForStrategy(this.bridge, [this.memory.objective, ...this.memory.nextStrategicActions].join(" ")).catch(() => []);
+    const starterPrototypeAvailability = await this.bridge.call<DescribePrototypesResult>("describe_prototype", { names: ["burner-mining-drill", "electric-mining-drill", "stone-furnace", "transport-belt", "inserter", "wooden-chest", "iron-chest", "solar-panel", "accumulator"] }).catch(() => ({}));
     const context = JSON.stringify({
       objective: this.memory.objective,
       rootGoalId: this.memory.rootGoalId,
       goals: this.memory.goals.slice(-60).map((goal) => ({ id: goal.id, parentId: goal.parentId, kind: goal.kind, title: goal.title, status: goal.status, blockers: goal.blockers, evidence: goal.evidence.slice(-6), result: goal.result })),
       world: { knownAreas: this.memory.knownAreas.slice(-8), productionLines: this.memory.productionLines.slice(-8), research: this.memory.research.slice(-8) },
-      productionPlans, failures: this.memory.failedApproaches.slice(-8), crew: state ? { tick: state.tick, companion: state.companion, otherCompanions: state.other_companions, research: state.research, production: state.production_top } : null,
+      productionPlans, starterPrototypeAvailability, failures: this.memory.failedApproaches.slice(-8), crew: state ? { tick: state.tick, companion: state.companion, otherCompanions: state.other_companions, research: state.research, production: state.production_top } : null,
     });
     let plan: CoordinatorPlan | undefined; let resolved: ResolvedPlan | undefined; let semanticError = ""; let repairFeedback = "";
     for (let attempt = 0; attempt < 2; attempt++) {
       const controller = this.modelController();
       try {
         plan = coordinatorPlanSchema.parse(await this.coordinatorGenerate({ model: this.model, context: attempt === 0 ? context : `${context}\nCOORDINATOR_PLAN_REPAIR_REQUIRED:\n${repairFeedback}\nCorrect the failed object so it conforms exactly to the required coordinator schema. Return one complete corrected object only.`, signal: controller.signal }));
+        this.normalizePlanAreas(plan);
         await this.validatePlanExecution(plan);
         resolved = resolveCoordinatorPlan(this.memory, plan); break;
       } catch (error) {
@@ -370,9 +379,25 @@ export class AutonomousSupervisor {
     if (plan.playerMessage) await this.bridge.call("say", { text: plan.playerMessage }).catch(() => undefined);
   }
 
+  private normalizePlanAreas(plan: CoordinatorPlan): void {
+    for (const goal of plan.goals) {
+      if (goal.area || !isConstructionGoal(goal)) continue;
+      const areas = goal.verification.flatMap((check) => { const area = spatialVerificationArea(check); return area ? [area] : []; });
+      if (areas.length === 0) continue;
+      const [first] = areas; const identical = areas.every((area) => area.x === first!.x && area.y === first!.y && area.radius === first!.radius);
+      if (!identical) continue;
+      goal.area = { ...first! };
+      this.trajectory.append({ type: "coordinator_plan_normalized", data: { goal: goal.title, field: "area", value: goal.area, reason: "copied from identical deterministic spatial verification areas" } });
+    }
+  }
+
   private async validatePlanExecution(plan: CoordinatorPlan): Promise<void> {
     if (plan.goals.length > 1 && !plan.goals.every((goal) => goal.independentlyExecutable === true && goal.dependsOnTitles.length === 0)) {
       throw new Error("multi-leaf wave rejected: every leaf must explicitly be independentlyExecutable and require no result from another leaf; return only the first currently executable leaf");
+    }
+    for (const goal of plan.goals) if (isConstructionGoal(goal) && !goal.area) {
+      const spatial = goal.verification.filter((check) => ["entity_count", "resource_count", "operational", "no_factory_blocker"].includes(check.kind));
+      throw new Error(`construction tactical goal "${goal.title}" requires an area; ${spatial.length === 0 ? "no spatial verification area was provided" : "spatial verification areas conflict"}`);
     }
     const checks = [...plan.campaignVerification, ...plan.strategicGoals.flatMap((goal) => goal.verification), ...plan.goals.flatMap((goal) => goal.verification)];
     const names = [...new Set(checks.flatMap((check) => {
@@ -390,6 +415,13 @@ export class AutonomousSupervisor {
       if (!prototype || prototype.kind !== "entity") throw new Error(`unknown verification prototype "${name}"; use an exact canonical Factorio entity/resource name`);
       if (check.kind === "resource_count" && prototype.entity_type !== "resource") throw new Error(`resource_count prototype "${name}" is not a resource`);
       if (check.kind !== "resource_count" && prototype.entity_type === "resource") throw new Error(`verification prototype "${name}" is a resource; use resource_count instead of ${check.kind}`);
+    }
+    for (const goal of plan.goals.filter(isConstructionGoal)) {
+      for (const check of goal.verification) {
+        const name = check.kind === "entity_count" || check.kind === "operational" ? check.entity : undefined; if (!name) continue;
+        const prototype = descriptions[name];
+        if (prototype?.placed_by_item && prototype.recipe_enabled === false) throw new Error(`construction prototype "${name}" is not currently craftable because its recipe is unavailable; choose infrastructure supported by current game state`);
+      }
     }
   }
 

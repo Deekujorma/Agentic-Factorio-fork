@@ -175,6 +175,7 @@ export interface PrototypeInfo {
   // -- entity fields --
   entity?: string;
   entity_type?: string;
+  recipe_enabled?: boolean;
   placed_by_item?: string;
   tile_width?: number;
   tile_height?: number;
