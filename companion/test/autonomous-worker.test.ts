@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Bridge } from "../src/bridge.js";
 import { CoordinationBroker } from "../src/coordination/broker.js";
 import { buildWorkerTools } from "../src/autonomous/worker.js";
+import { AUTONOMOUS_WORKER_PROMPT } from "../src/autonomous/prompts.js";
 
 const roots: string[] = [];
 afterEach(() => roots.splice(0).forEach((value) => fs.rmSync(value, { recursive: true, force: true })));
@@ -46,6 +47,11 @@ describe("autonomous worker tool safety", () => {
     const { broker, worker, tools } = await setup(); const reservation = (await broker.snapshot()).reservations[0]!; await broker.releaseArea(worker.id, reservation.id);
     await expect(tools.craft_items.execute({ recipe: "iron-gear-wheel", count: 1 })).resolves.toBe("done");
     await expect(tools.place_entity.execute({ item: "transport-belt", x: 0, y: 0 })).rejects.toThrow(/requires an active area reservation/);
+  });
+
+  it("exposes fresh-game bootstrap tools and instructs workers to self-source first", async () => {
+    const { tools } = await setup(); expect(tools.mine).toBeDefined(); expect(tools.craft_items).toBeDefined(); expect(tools.insert_items).toBeDefined(); expect(tools.extract_items).toBeDefined(); expect(tools.place_entity).toBeDefined(); expect(tools.build_plan).toBeDefined();
+    expect(AUTONOMOUS_WORKER_PROMPT).toContain("Before requesting starter materials"); expect(AUTONOMOUS_WORKER_PROMPT).toContain("mine (ore/stone/coal/trees within 80 tiles)");
   });
 
   it("constrains explicit-position entity mutations and positional mining when reserved", async () => {

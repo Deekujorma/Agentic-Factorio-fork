@@ -174,6 +174,7 @@ export interface PrototypeInfo {
   kind: "entity" | "recipe" | "unknown";
   // -- entity fields --
   entity?: string;
+  entity_type?: string;
   placed_by_item?: string;
   tile_width?: number;
   tile_height?: number;

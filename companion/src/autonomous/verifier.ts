@@ -15,6 +15,7 @@ function toRpcCheck(value: Verification): RpcCheck | null {
   switch (value.kind) {
     case "goal_dependencies": case "manual": return null;
     case "entity_count": return { kind: value.kind, entity: value.entity, minimum: value.minimum, area: value.area };
+    case "resource_count": return { kind: value.kind, resource: value.resource, minimum: value.minimum, area: value.area };
     case "inventory": return { kind: value.kind, item: value.item, minimum: value.minimum, unit_number: value.unitNumber, position: value.position };
     case "research": return { kind: value.kind, technology: value.technology };
     case "production": return { kind: value.kind, item: value.item, minimum_per_minute: value.minimumPerMinute };

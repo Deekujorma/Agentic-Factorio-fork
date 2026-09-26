@@ -247,7 +247,7 @@ Resource letters uppercase, building letters lowercase, assigned dynamically and
 per name (item, entity or recipe — resolve in that order, follow item→place_result):
 ```jsonc
 { "burner-mining-drill": {
-    "kind":"entity", "entity":"burner-mining-drill", "placed_by_item":"burner-mining-drill",
+    "kind":"entity", "entity":"burner-mining-drill", "entity_type":"mining-drill", "placed_by_item":"burner-mining-drill",
     "tile_width":2, "tile_height":2,
     "drop_offset":{"x":-0.5,"y":-1.5},       // vector_to_place_result at direction 0 (north); rotate with the entity
     "energy":"burner", "fuel_categories":["chemical"],
@@ -398,10 +398,12 @@ same time.
 ### `verify_autonomous`
 
 Input: `{ checks: VerificationCheck[] }` (1–32 checks). Supported checks are
-`entity_count`, `inventory`, `research`, `production`, `operational`, and
+`entity_count`, `resource_count`, `inventory`, `research`, `production`, `operational`, and
 `no_factory_blocker`, `companion_near_player`, and `event_count` (currently
 `rocket_launched`). The blocker predicate succeeds only when the matching area contains
 zero machines in a known blocked state.
+`entity_count` is restricted to player-force entities. `resource_count` counts only
+the named neutral resource prototype (`type = "resource"`) and never applies a force filter.
 `companion_near_player` accepts `companion` and `player` names. When either is
 provided, verification targets that exact identity and fails if it does not exist;
 only an omitted player uses the first-connected-player fallback.

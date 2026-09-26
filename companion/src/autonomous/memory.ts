@@ -20,6 +20,7 @@ const areaSchema = z.object({ x: z.number(), y: z.number(), radius: z.number().p
 export const verificationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("goal_dependencies"), goalIds: z.array(z.string()).min(1) }),
   z.object({ kind: z.literal("entity_count"), entity: z.string(), minimum: z.number().int().nonnegative(), area: areaSchema }),
+  z.object({ kind: z.literal("resource_count"), resource: z.string(), minimum: z.number().int().nonnegative(), area: areaSchema }),
   z.object({ kind: z.literal("inventory"), item: z.string(), minimum: z.number().nonnegative(), unitNumber: z.number().int().positive().optional(), position: z.object({ x: z.number(), y: z.number() }).optional() }),
   z.object({ kind: z.literal("research"), technology: z.string() }),
   z.object({ kind: z.literal("production"), item: z.string(), minimumPerMinute: z.number().nonnegative() }),
@@ -52,7 +53,7 @@ export const goalSchema = z.object({
   result: z.string().optional(),
   nextReviewAt: z.string().datetime().optional(),
   job: z.object({
-    area: areaSchema.optional(), expectedInputs: z.array(z.string()), expectedOutput: z.string(), definitionOfDone: z.string(), requestedBy: z.string().optional(),
+    area: areaSchema.optional(), expectedInputs: z.array(z.string()), expectedOutput: z.string(), definitionOfDone: z.string(), requestedBy: z.string().optional(), waveId: z.string().optional(),
   }).optional(),
 });
 export type Goal = z.infer<typeof goalSchema>;

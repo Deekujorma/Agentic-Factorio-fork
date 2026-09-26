@@ -14,12 +14,17 @@ _G.defines = {
 }
 local inventory = { get_item_count = function(name) return name == "plate" and 20 or 0 end }
 local chest = { status = 1, get_inventory = function(index) if index == 1 then return inventory end end, get_item_count = function() return 0 end }
+local force
 local surface = {
-  count_entities_filtered = function(args) return args.name == "assembling-machine-1" and 2 or 0 end,
+  count_entities_filtered = function(args)
+    if args.type == "resource" and args.name == "iron-ore" and args.force == nil then return 735 end
+    if args.name == "assembling-machine-1" and args.force == force then return 2 end
+    return 0
+  end,
   find_entities_filtered = function() return { chest } end,
 }
 local stats = { get_flow_count = function(args) return args.name == "plate" and 60 or 0 end }
-local force = {
+force = {
   technologies = { automation = { researched = true } },
   get_item_production_statistics = function() return stats end,
   recipes = {
@@ -40,12 +45,13 @@ _G.storage = { autonomous = { event_counts = { rocket_launched = 1 } }, companio
 local autonomous = require("scripts.autonomous")
 local verified = autonomous.verify({ checks = {
   { kind = "entity_count", entity = "assembling-machine-1", minimum = 2, area = { x = 0, y = 0, radius = 5 } },
+  { kind = "resource_count", resource = "iron-ore", minimum = 8, area = { x = -34, y = 83.5, radius = 20 } },
   { kind = "inventory", item = "plate", minimum = 10, unit_number = 1 },
   { kind = "research", technology = "automation" },
   { kind = "production", item = "plate", minimum_per_minute = 60 },
   { kind = "operational", entity = "assembling-machine-1", minimum = 1, area = { x = 0, y = 0, radius = 5 } },
 } })
-check(verified.tick == 42 and #verified.results == 5, "autonomous verification returns tick and every result")
+check(verified.tick == 42 and #verified.results == 6, "autonomous verification returns tick and every result")
 for i, result in ipairs(verified.results) do check(result.ok, "verification predicate " .. i .. " passes") end
 
 local graph = autonomous.recipe_graph({ item = "iron-gear-wheel", include_all = true })

@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Bridge } from "../bridge.js";
 import { CoordinationBroker, type CoordinationEvent, type CoordinationJob } from "../coordination/broker.js";
 import { log } from "../log.js";
-import type { ChatMessage, GetStateResult } from "../types.js";
+import type { ChatMessage, DescribePrototypesResult, GetStateResult } from "../types.js";
 import { GoalGraph } from "./goals.js";
 import { autonomousMemorySchema, MemoryStore, verificationSchema, type AutonomousMemory, type Goal } from "./memory.js";
 import { AUTONOMOUS_COORDINATOR_PROMPT } from "./prompts.js";
@@ -14,7 +14,7 @@ import { BridgeVerificationReader, verifyGoal, type VerificationReader } from ".
 import { defaultIntentClassifier, type IntentClassifier, type PlayerIntent } from "./intent.js";
 import { productionPlansForStrategy } from "./productionPlanner.js";
 import { defaultTacticalPlanner, tacticalPlanSchema, type TacticalPlanner } from "./tactical.js";
-import { resolveCoordinatorPlan, type ResolvedPlan } from "./planResolver.js";
+import { normalizeGoalReference, resolveCoordinatorPlan, type ResolvedPlan } from "./planResolver.js";
 
 const plannedGoalSchema = z.object({
   title: z.string().min(1), description: z.string().min(1), priority: z.number().int().min(-100).max(100).default(0),
@@ -23,6 +23,7 @@ const plannedGoalSchema = z.object({
   expectedInputs: z.array(z.string()).default([]), expectedOutput: z.string().min(1), definitionOfDone: z.string().min(1),
   verification: z.array(verificationSchema).min(1),
   parentTitle: z.string().optional(),
+  independentlyExecutable: z.boolean().optional(),
 }).superRefine((goal, context) => {
   if (/\b(build|construct|place|deconstruct|blueprint)\b/i.test(goal.description) && !goal.area) context.addIssue({ code: "custom", message: "construction tactical goals require an area", path: ["area"] });
 });
@@ -176,13 +177,21 @@ export class AutonomousSupervisor {
   }
 
   private async replaceObjective(message: ChatMessage, objective = message.text): Promise<void> {
+    const requested = objective.trim();
+    if (this.memory.objective && normalizeGoalReference(this.memory.objective) === normalizeGoalReference(requested)) {
+      const wasBlocked = this.memory.campaignStatus === "blocked" || this.memory.paused;
+      this.memory.paused = false; this.memory.stopReason = undefined; this.memory.campaignStatus = "running"; this.memory.blockers = [];
+      this.checkpoint("objective_reaffirmed", { player: message.player, objective: this.memory.objective }, message.tick);
+      await this.bridge.call("say", { text: wasBlocked ? "That objective is already active; I will replan from the current blocker." : "That objective is already active; I will continue the existing campaign." }).catch(() => undefined);
+      this.requestWake("objective_reaffirmed"); return;
+    }
     for (const controller of this.aborts) controller.abort();
     await this.bridge.call("cancel", { all: true }).catch(() => undefined);
     await this.broker.recoverAgents(this.scheduler.all().map((slot) => slot.id));
     await this.broker.abandonJobs(this.memory.activeJobs.map((job) => job.jobId), "superseded by player instruction");
     this.graph.cancelOpen("superseded by player instruction");
     this.memory.activeJobs = [];
-    this.memory.objective = objective.trim();
+    this.memory.objective = requested;
     const state = await this.bridge.call<GetStateResult>("get_state", {}).catch(() => null);
     this.memory.campaignStartedTick = state?.tick;
     this.memory.objectiveHistory.push({ objective: this.memory.objective, at: new Date().toISOString(), player: message.player });
@@ -283,7 +292,7 @@ export class AutonomousSupervisor {
     const context = JSON.stringify({
       objective: this.memory.objective,
       rootGoalId: this.memory.rootGoalId,
-      goals: this.memory.goals.slice(-60).map((goal) => ({ id: goal.id, parentId: goal.parentId, kind: goal.kind, title: goal.title, status: goal.status, blockers: goal.blockers, result: goal.result })),
+      goals: this.memory.goals.slice(-60).map((goal) => ({ id: goal.id, parentId: goal.parentId, kind: goal.kind, title: goal.title, status: goal.status, blockers: goal.blockers, evidence: goal.evidence.slice(-6), result: goal.result })),
       world: { knownAreas: this.memory.knownAreas.slice(-8), productionLines: this.memory.productionLines.slice(-8), research: this.memory.research.slice(-8) },
       productionPlans, failures: this.memory.failedApproaches.slice(-8), crew: state ? { tick: state.tick, companion: state.companion, otherCompanions: state.other_companions, research: state.research, production: state.production_top } : null,
     });
@@ -292,6 +301,7 @@ export class AutonomousSupervisor {
       const controller = this.modelController();
       try {
         plan = coordinatorPlanSchema.parse(await this.coordinatorGenerate({ model: this.model, context: attempt === 0 ? context : `${context}\nCOORDINATOR_PLAN_REPAIR_REQUIRED:\n${repairFeedback}\nCorrect the failed object so it conforms exactly to the required coordinator schema. Return one complete corrected object only.`, signal: controller.signal }));
+        await this.validatePlanExecution(plan);
         resolved = resolveCoordinatorPlan(this.memory, plan); break;
       } catch (error) {
         semanticError = error instanceof Error ? error.message : String(error);
@@ -344,12 +354,13 @@ export class AutonomousSupervisor {
       if (strategic.verification?.length) this.graph.update(goal.id, { verification: strategic.verification });
       if (goal.status === "pending") this.graph.recover(goal.id, "active");
     }
+    const waveId = `wave-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     for (const item of resolved.tactical) {
       const planned = item.input as CoordinatorPlan["goals"][number];
       if (item.existing) continue;
       const goal = this.graph.create({
         id: item.id, kind: "tactical", parentId: item.parentId, title: planned.title, description: planned.description, priority: planned.priority,
-        verification: planned.verification, job: { area: planned.area, expectedInputs: planned.expectedInputs, expectedOutput: planned.expectedOutput, definitionOfDone: planned.definitionOfDone },
+        verification: planned.verification, job: { area: planned.area, expectedInputs: planned.expectedInputs, expectedOutput: planned.expectedOutput, definitionOfDone: planned.definitionOfDone, waveId },
       });
       this.trajectory.append({ type: "goal_created", goalId: goal.id, data: { title: goal.title } });
     }
@@ -357,6 +368,29 @@ export class AutonomousSupervisor {
     this.graph.refreshReady();
     await this.completeProposedStrategicGoals(plan.completeStrategicGoals ?? []);
     if (plan.playerMessage) await this.bridge.call("say", { text: plan.playerMessage }).catch(() => undefined);
+  }
+
+  private async validatePlanExecution(plan: CoordinatorPlan): Promise<void> {
+    if (plan.goals.length > 1 && !plan.goals.every((goal) => goal.independentlyExecutable === true && goal.dependsOnTitles.length === 0)) {
+      throw new Error("multi-leaf wave rejected: every leaf must explicitly be independentlyExecutable and require no result from another leaf; return only the first currently executable leaf");
+    }
+    const checks = [...plan.campaignVerification, ...plan.strategicGoals.flatMap((goal) => goal.verification), ...plan.goals.flatMap((goal) => goal.verification)];
+    const names = [...new Set(checks.flatMap((check) => {
+      if (check.kind === "entity_count" || check.kind === "operational") return [check.entity];
+      if (check.kind === "no_factory_blocker" && check.entity) return [check.entity];
+      if (check.kind === "resource_count") return [check.resource];
+      return [];
+    }))];
+    const descriptions: DescribePrototypesResult = {};
+    for (let index = 0; index < names.length; index += 10) Object.assign(descriptions, await this.bridge.call<DescribePrototypesResult>("describe_prototype", { names: names.slice(index, index + 10) }));
+    for (const check of checks) {
+      const name = check.kind === "resource_count" ? check.resource : (check.kind === "entity_count" || check.kind === "operational" || check.kind === "no_factory_blocker") ? check.entity : undefined;
+      if (!name) continue;
+      const prototype = descriptions[name];
+      if (!prototype || prototype.kind !== "entity") throw new Error(`unknown verification prototype "${name}"; use an exact canonical Factorio entity/resource name`);
+      if (check.kind === "resource_count" && prototype.entity_type !== "resource") throw new Error(`resource_count prototype "${name}" is not a resource`);
+      if (check.kind !== "resource_count" && prototype.entity_type === "resource") throw new Error(`verification prototype "${name}" is a resource; use resource_count instead of ${check.kind}`);
+    }
   }
 
   private async dispatchReady(): Promise<void> {
@@ -420,7 +454,7 @@ export class AutonomousSupervisor {
       if (result.status === "blocked") {
         const blocker = result.blocker ?? result.summary;
         await this.broker.failJob(workerId, job.id, blocker, false);
-        goal.blockers = [blocker]; this.graph.transition(goal.id, "blocked", blocker);
+        goal.blockers = [blocker]; this.graph.transition(goal.id, "blocked", blocker); this.blockRemainingWave(goal, blocker);
         this.trajectory.append({ type: "worker_blocked", agentId: workerId, goalId: goal.id, jobId: job.id, data: { blocker } });
         return;
       }
@@ -442,7 +476,7 @@ export class AutonomousSupervisor {
       } else {
         goal.blockers = ["deterministic verification failed"];
         if (goal.attempts < goal.maxAttempts) { goal.blockers = []; this.graph.transition(goal.id, "ready", verification.evidence.join("; ")); }
-        else this.graph.transition(goal.id, "blocked", verification.evidence.join("; "));
+        else { this.graph.transition(goal.id, "blocked", verification.evidence.join("; ")); this.blockRemainingWave(goal, "prerequisite verification blocked"); }
       }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
@@ -466,9 +500,18 @@ export class AutonomousSupervisor {
     this.memory.failedApproaches.push(`${goal.title}: ${error}`);
     if (goal.status === "active" || goal.status === "verifying") {
       if (goal.attempts < goal.maxAttempts) { goal.blockers = []; this.graph.transition(goal.id, "ready", error); }
-      else { goal.blockers = [error]; this.graph.transition(goal.id, "blocked", error); }
+      else { goal.blockers = [error]; this.graph.transition(goal.id, "blocked", error); this.blockRemainingWave(goal, error); }
     }
     this.trajectory.append({ type: "replanning", goalId: goal.id, jobId: event?.jobId, data: { error, attempts: goal.attempts } });
+  }
+
+  private blockRemainingWave(failed: Goal, reason: string): void {
+    const waveId = failed.job?.waveId; if (!waveId) return;
+    for (const goal of this.memory.goals) {
+      if (goal.id === failed.id || goal.job?.waveId !== waveId || goal.status !== "ready") continue;
+      goal.blockers = [`wave prerequisite blocked: ${failed.title}`];
+      this.graph.transition(goal.id, "blocked", `${reason}; awaiting coordinator replan`);
+    }
   }
 
   private async completeProposedStrategicGoals(titles: string[]): Promise<void> {

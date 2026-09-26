@@ -47,6 +47,12 @@ function M.verify(params)
       expected = math.max(0, tonumber(check.minimum) or 0)
       actual = surface.count_entities_filtered({area = area_of(check.area), name = check.entity, force = force})
       passed = actual >= expected
+    elseif kind == "resource_count" then
+      expected = math.max(0, tonumber(check.minimum) or 0)
+      actual = surface.count_entities_filtered({
+        area = area_of(check.area), type = "resource", name = check.resource,
+      })
+      passed = actual >= expected
     elseif kind == "inventory" then
       expected = math.max(0, tonumber(check.minimum) or 0)
       local entity

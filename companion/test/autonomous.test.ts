@@ -39,6 +39,7 @@ function fakeBridge(): BridgeHarness {
       if (method === "cancel") return { cancelled: 1 };
       if (method === "list_blueprints") return { books: [{ label: "Power" }] };
       if (method === "get_recipe_graph") return { recipes: [] };
+      if (method === "describe_prototype") return Object.fromEntries(((params as { names: string[] }).names).map((name) => [name, name === "iron-ore" ? { kind: "entity", entity: name, entity_type: "resource" } : ["assembling-machine-1", "burner-mining-drill", "stone-furnace"].includes(name) ? { kind: "entity", entity: name, entity_type: "assembling-machine" } : { kind: "unknown" }]));
       return {};
     },
     scoped: (name: string) => make(name),
@@ -91,6 +92,13 @@ describe("autonomous memory, goals, and deterministic helpers", () => {
     const current = goal({ verification: [{ kind: "entity_count", entity: "assembling-machine-1", minimum: 2, area: { x: 0, y: 0, radius: 5 } }] });
     expect((await verifyGoal(current, { verify: async () => ({ tick: 99, results: [{ kind: "entity_count", ok: true, actual: 2, expected: 2 }] }) }, [current])).ok).toBe(true);
     expect((await verifyGoal(goal(), { verify: async () => ({ tick: 0, results: [] }) }, [])).ok).toBe(false);
+  });
+
+  it("converts resource_count to the dedicated read-only RPC predicate", async () => {
+    let rpc: unknown;
+    const current = goal({ verification: [{ kind: "resource_count", resource: "iron-ore", minimum: 8, area: { x: -34, y: 83.5, radius: 20 } }] });
+    const outcome = await verifyGoal(current, { verify: async (checks) => { rpc = checks[0]; return { tick: 99, results: [{ kind: "resource_count", ok: true, actual: 735, expected: 8 }] }; } }, [current]);
+    expect(rpc).toEqual({ kind: "resource_count", resource: "iron-ore", minimum: 8, area: { x: -34, y: 83.5, radius: 20 } }); expect(outcome.ok).toBe(true);
   });
 
   it("calculates speed-one recipe math, alternatives, probability, fluids, and cycles", () => {
@@ -192,6 +200,17 @@ describe("player intent routing", () => {
     fail = true; const before = supervisor.snapshot().objective; await supervisor.handleChat({ id: 3, tick: 3, player: "P", text: "ambiguous words" }); expect(supervisor.snapshot().objective).toBe(before);
     fail = false; await supervisor.handleChat({ id: 4, tick: 4, player: "P", text: "forget the rocket, build defenses instead" }); expect(supervisor.snapshot().objective).toContain("defenses"); supervisor.dispose();
   });
+
+  it("reaffirms normalized duplicate objectives without replacing the campaign", async () => {
+    const harness = fakeBridge(); const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "duplicate-objective", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(blockedPlan()), workerGenerate: async () => completed(), intentClassifier: async ({ message }) => ({ kind: "replace", summary: message, target: message }) });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "Automate iron plate production." }); await supervisor.whenIdle();
+    const before = supervisor.snapshot(); const cancelCount = harness.calls.filter((call) => call.method === "cancel").length;
+    for (const [index, text] of ["Automate iron plate production.", "automate iron plate production", " AUTOMATE IRON PLATE PRODUCTION. "].entries()) {
+      await supervisor.handleChat({ id: index + 2, tick: index + 2, player: "P", text }); await supervisor.whenIdle();
+      const state = supervisor.snapshot(); expect(state.rootGoalId).toBe(before.rootGoalId); expect(state.goals.map((goal) => goal.id)).toEqual(before.goals.map((goal) => goal.id));
+    }
+    expect(harness.calls.filter((call) => call.method === "cancel").length).toBe(cancelCount); supervisor.dispose();
+  });
 });
 
 describe("coordinator semantic plan resolution", () => {
@@ -264,6 +283,52 @@ describe("coordinator semantic plan resolution", () => {
 
   it("spawns generic companions only for non-autonomous brains", () => {
     expect(shouldSpawnGenericCompanion("autonomous")).toBe(false); expect(shouldSpawnGenericCompanion("api")).toBe(true); expect(shouldSpawnGenericCompanion("codex")).toBe(true);
+  });
+
+  it("rejects unknown and resource-misclassified verification prototypes before execution", async () => {
+    for (const [key, verification, expected] of [
+      ["unknown-prototype", { kind: "entity_count", entity: "iron-smelter", minimum: 1, area: { x: 0, y: 0, radius: 5 } }, "unknown verification prototype"],
+      ["resource-as-entity", { kind: "entity_count", entity: "iron-ore", minimum: 8, area: { x: -34, y: 83.5, radius: 20 } }, "use resource_count"],
+    ] as const) {
+      const harness = fakeBridge(); let workers = 0; const contexts: string[] = [];
+      const plan: CoordinatorPlan = { decision: "survey", objectiveComplete: false, campaignVerification: [], strategicGoals: [], goals: [{ title: "Survey", description: "survey", priority: 1, dependsOnTitles: [], expectedInputs: [], expectedOutput: "site", definitionOfDone: "verified", verification: [verification] }] };
+      const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key, workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: async ({ context }) => { contexts.push(context); return plan; }, workerGenerate: async () => { workers++; return completed(); } });
+      await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "survey" }); await supervisor.whenIdle();
+      expect(contexts).toHaveLength(2); expect(contexts[1]).toContain(expected); expect(workers).toBe(0); expect(supervisor.snapshot().goals.filter((goal) => goal.kind === "tactical")).toEqual([]); supervisor.dispose();
+    }
+  });
+
+  it("accepts a canonical player entity verification prototype", async () => {
+    const harness = fakeBridge(); let workers = 0;
+    const plan: CoordinatorPlan = { decision: "inspect", objectiveComplete: false, campaignVerification: [], strategicGoals: [], goals: [{ title: "Inspect assembler", description: "inspect assembler", priority: 1, dependsOnTitles: [], expectedInputs: [], expectedOutput: "assembler", definitionOfDone: "assembler exists", verification: [{ kind: "entity_count", entity: "assembling-machine-1", minimum: 1, area: { x: 0, y: 0, radius: 5 } }] }] };
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "canonical-prototype", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: sequence(plan, blockedPlan()), workerGenerate: async () => { workers++; return completed(); }, verificationReader: { verify: async () => ({ tick: 4, results: [{ kind: "entity_count", ok: true, actual: 1, expected: 1 }] }) } });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "inspect" }); await supervisor.whenIdle(); expect(workers).toBe(1); expect(supervisor.snapshot().goals.find((goal) => goal.title === "Inspect assembler")?.status).toBe("done"); supervisor.dispose();
+  });
+
+  it("rejects a staged multi-leaf wave, repairs to survey only, then replans after resource verification", async () => {
+    const harness = fakeBridge(); const workerObjectives: string[] = []; let coordinatorCalls = 0;
+    const strategicGoals = [strategic("Locate iron"), strategic("Build smelting"), strategic("Verify output")];
+    const survey = { title: "Locate ore", parentTitle: "Locate iron", description: "locate iron ore", priority: 10, dependsOnTitles: [], expectedInputs: [], expectedOutput: "iron coordinates", definitionOfDone: "resource patch verified", verification: [{ kind: "resource_count" as const, resource: "iron-ore", minimum: 8, area: { x: -34, y: 83.5, radius: 20 } }] };
+    const build = { title: "Build line", parentTitle: "Build smelting", description: "build mining and smelting line", priority: 9, dependsOnTitles: [], area: { x: -34, y: 83.5, radius: 20 }, expectedInputs: ["starter materials"], expectedOutput: "iron plates", definitionOfDone: "line built", verification: [{ kind: "event_count" as const, event: "rocket_launched" as const, minimum: 1 }] };
+    const verify = { title: "Verify production", parentTitle: "Verify output", description: "verify iron output", priority: 8, dependsOnTitles: [], expectedInputs: [], expectedOutput: "rate", definitionOfDone: "rate verified", verification: [{ kind: "production" as const, item: "iron-plate", minimumPerMinute: 1 }] };
+    const staged: CoordinatorPlan = { decision: "all stages", objectiveComplete: false, campaignVerification: [], strategicGoals, goals: [survey, build, verify], playerMessage: "Building everything now" };
+    const surveyOnly: CoordinatorPlan = { decision: "survey first", objectiveComplete: false, campaignVerification: [], strategicGoals, goals: [survey], playerMessage: "Surveying the ore site" };
+    const buildOnly: CoordinatorPlan = { decision: "build after survey", objectiveComplete: false, campaignVerification: [], strategicGoals, goals: [build], playerMessage: "The verified site is ready for construction" };
+    const plans = [staged, surveyOnly, buildOnly, blockedPlan()];
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "iron-stages", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: async () => plans[Math.min(coordinatorCalls++, plans.length - 1)]!, workerGenerate: async ({ packet }) => { workerObjectives.push(packet.objective); return completed(); }, verificationReader: { verify: async (checks) => ({ tick: 20, results: checks.map((check) => ({ kind: check.kind, ok: true, actual: check.kind === "resource_count" ? 735 : 1, expected: check.kind === "resource_count" ? 8 : 1 })) }) } });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "Automate iron plate production." }); await supervisor.whenIdle();
+    expect(workerObjectives).toEqual(["locate iron ore", "build mining and smelting line"]); expect(coordinatorCalls).toBeGreaterThanOrEqual(4);
+    expect(harness.calls.some((call) => call.method === "say" && JSON.stringify(call.params).includes("Building everything now"))).toBe(false);
+    expect(supervisor.snapshot().goals.find((goal) => goal.title === "Locate ore")?.evidence.some((item) => item.includes("actual=735"))).toBe(true); supervisor.dispose();
+  });
+
+  it("replans after failed resource verification without dispatching downstream construction", async () => {
+    const harness = fakeBridge(); let coordinatorCalls = 0; let workers = 0; const contexts: string[] = [];
+    const survey: CoordinatorPlan = { decision: "survey", objectiveComplete: false, campaignVerification: [], strategicGoals: [strategic("Locate iron")], goals: [{ title: "Locate ore", parentTitle: "Locate iron", description: "locate iron ore", priority: 10, dependsOnTitles: [], expectedInputs: [], expectedOutput: "iron coordinates", definitionOfDone: "resource patch verified", verification: [{ kind: "resource_count", resource: "iron-ore", minimum: 8, area: { x: -34, y: 83.5, radius: 20 } }] }] };
+    const supervisor = new AutonomousSupervisor(harness.bridge, {} as never, { key: "iron-blocked", workers: 1, memoryRoot: root(), brokerRoot: root(), coordinatorGenerate: async ({ context }) => { contexts.push(context); return coordinatorCalls++ === 0 ? survey : blockedPlan(); }, workerGenerate: async () => { workers++; return completed("ore observed in scan"); }, verificationReader: { verify: async () => ({ tick: 20, results: [{ kind: "resource_count", ok: false, actual: 0, expected: 8 }] }) } });
+    await supervisor.start(); await supervisor.instruct({ id: 1, tick: 1, player: "P", text: "Automate iron plate production." }); await supervisor.whenIdle();
+    expect(workers).toBe(3); expect(supervisor.snapshot().goals.find((goal) => goal.title === "Locate ore")?.status).toBe("blocked");
+    expect(contexts.at(-1)).toContain("resource_count: actual=0 expected=8 fail"); expect(supervisor.snapshot().goals.some((goal) => goal.title.includes("Build"))).toBe(false); supervisor.dispose();
   });
 });
 

@@ -419,7 +419,7 @@ end
 -- -------------------------------------------------------- describe_prototype
 
 local function describe_entity(ent, item_name)
-  local out = { kind = "entity", entity = ent.name }
+  local out = { kind = "entity", entity = ent.name, entity_type = ent.type }
 
   if not item_name then
     -- Which item places this entity (nice to know when the caller asked by
